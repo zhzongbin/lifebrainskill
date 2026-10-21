@@ -28,18 +28,41 @@ HOURS = re.compile(r"([\d.]+)h")
 DATE_HEAD = re.compile(r"^## (\d{4}-\d{2}-\d{2})\s*$")
 
 
+def config_home() -> Path:
+    """Fixed home for the config file: ``~/lifebrain/config.yaml``.
+
+    The config *shell* always lives here; ``data_dir`` inside it may point
+    anywhere (another disk, a sync folder, a workspace). Keeping the config in
+    one fixed place avoids two configs drifting apart.
+    """
+    return Path.home() / "lifebrain"
+
+
+def config_path() -> Path:
+    return config_home() / "config.yaml"
+
+
+def data_dir_source() -> str:
+    """Where the current data dir came from: env / config / default."""
+    if os.environ.get("LB_DATA_DIR"):
+        return "env:LB_DATA_DIR"
+    cfg = config_path()
+    if cfg.exists() and read_yaml(cfg).get("data_dir"):
+        return "config"
+    return "default"
+
+
 def default_data_dir() -> Path:
     """Resolve the data dir: $LB_DATA_DIR > config.yaml:data_dir > ~/lifebrain."""
     env = os.environ.get("LB_DATA_DIR")
     if env:
         return Path(env).expanduser()
-    home = Path.home() / "lifebrain"
-    cfg = home / "config.yaml"
+    cfg = config_path()
     if cfg.exists():
         data = read_yaml(cfg).get("data_dir")
         if data:
             return Path(str(data)).expanduser()
-    return home
+    return config_home()
 
 
 def read_yaml(path: Path) -> dict:

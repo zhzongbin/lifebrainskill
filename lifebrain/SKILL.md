@@ -4,7 +4,8 @@ description: >-
   用 Markdown 记录每日工作生活：问答式引导写当日日志、追踪项目进度、每日定时提醒与漏记补录、
   周报月报与项目汇总。当用户说"记一下/记录一下/记今天/今天做了什么/周报/月报/项目汇总/项目进度"，
   或收到以 [lifebrain-reminder] 开头的定时提醒消息时使用。
-  数据目录 ~/lifebrain（可在 config.yaml 修改）。所有读写必须走 scripts/lifebrain.py，不要手写 Markdown。
+  数据目录默认 ~/lifebrain；首次使用时必须先向用户提议数据目录、得到确认后再初始化，
+  之后所有读写必须走 scripts/lifebrain.py，不要手写 Markdown。
 metadata:
   octop:
     emoji: "🧠"
@@ -25,11 +26,15 @@ metadata:
 | 东西 | 位置 |
 |------|------|
 | 脚本入口 | **本 skill 目录**下的 `scripts/lifebrain.py`（安装路径因实例而异，见下方解析） |
-| 数据目录 | `~/lifebrain`（可用环境变量 `LB_DATA_DIR` 或 `config.yaml:data_dir` 覆盖） |
-| 周文件 | `~/lifebrain/journals/YYYY-Www.md` — **唯一真相源** |
-| 项目注册表 | `~/lifebrain/projects.yaml` |
-| 项目索引 | `~/lifebrain/projects/<name>.md` — **脚本生成，禁止手改** |
-| 报告存档 | `~/lifebrain/reports/YYYY-Www.md` / `YYYY-MM.md` |
+| 配置文件 | `~/lifebrain/config.yaml` — **位置固定**，里面 `data_dir` 指向真正的数据目录 |
+| 数据目录 | 默认 `~/lifebrain`；可用环境变量 `LB_DATA_DIR` 或 `config.yaml:data_dir` 覆盖 |
+| 周文件 | `<数据目录>/journals/YYYY-Www.md` — **唯一真相源** |
+| 项目注册表 | `<数据目录>/projects.yaml` |
+| 项目索引 | `<数据目录>/projects/<name>.md` — **脚本生成，禁止手改** |
+| 报告存档 | `<数据目录>/reports/YYYY-Www.md` / `YYYY-MM.md` |
+
+> 路径解析顺序：环境变量 `LB_DATA_DIR` → `~/lifebrain/config.yaml` 的 `data_dir` → 默认 `~/lifebrain`。
+> `$LB config` 会告诉你当前生效的是哪一个（`data_dir_source` 字段）。
 
 ### 先解析脚本路径（安装位置因实例而异，别写死）
 
@@ -37,9 +42,12 @@ metadata:
 LB_SCRIPT="$(ls -d ~/.octop/agents/*/.octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
 [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d .octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
 [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d ~/.octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
+[ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d ~/.octop/skill-packages/*/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
 LB="python3 $LB_SCRIPT"
 ```
 
+前三条是「装在 agent 工作区里」的情况，第四条是「从实例级全局技能包挂载过来」的情况
+（包目录在 `~/.octop/skill-packages/<包ID>/skills/lifebrain/`，不需要复制到工作区也能跑）。
 三条都没命中就 `find ~ -path '*skills/lifebrain/scripts/lifebrain.py' 2>/dev/null | head -1`。
 解析一次后本轮对话复用 `$LB`；`$LB config` 会打印当前真实路径，可用它自检。
 
@@ -47,7 +55,8 @@ LB="python3 $LB_SCRIPT"
 
 | 命令 | 用途 |
 |------|------|
-| `$LB config` | 看当前数据目录、配置、脚本路径 |
+| `$LB config` | 看当前数据目录、配置、脚本路径、是否已初始化 |
+| `$LB init --data-dir <目录>` | **首次使用**初始化：建目录结构 + 写 `~/lifebrain/config.yaml`（需用户确认后调用） |
 | `$LB status [--date D] [--lookback N]` | 今天/指定日期是否已记录、条目、漏记日期、项目表、提醒 marker |
 | `$LB show --date D \| --week YYYY-Www \| --month YYYY-MM` | 读某个日期/周/月的条目 |
 | `$LB append ...` | 追加条目（**唯一的写入口**，写完自动重算索引） |
@@ -55,6 +64,57 @@ LB="python3 $LB_SCRIPT"
 | `$LB report --week W \| --month M` | 按项目聚合（时長、条目、空缺日期） |
 | `$LB rebuild` | 手动重算项目索引 |
 | `$LB mark-reminder` | 写「今天已提醒」marker（防重复打扰） |
+
+## 首次使用：先和用户确认数据目录（硬性流程）
+
+数据目录决定用户几十年的记录落在哪，**不能替用户默认决定，更不能默默建目录**。
+
+**第一步：查状态**
+
+```bash
+$LB config     # 看 initialized 与 data_dir_source
+```
+
+- `initialized: true` → 已有数据，**直接用现有目录**，不要问要不要换，也不要擅自迁移。
+- `initialized: false` → 走下面的协商流程。
+
+**第二步：提议 + 等待用户确认**（这一轮只问，不写盘）
+
+用一句人话把选项摆出来，然后**停下来等用户回话**：
+
+> "lifebrain 要把每天的记录写到一个本地目录。默认用 `~/lifebrain`（纯 Markdown，随时能带走或同步）。
+> 想换个地方吗？比如 iCloud/坚果云同步目录、某个代码仓库，或者你的笔记目录。你说一个，我就用它。"
+
+要点：
+- 默认值是**提议**，不是决定。用户没有明确回应就**不要**调 `init`、不要 mkdir、不要写任何文件。
+- 用户给了别的路径就用用户的路径；用户说"随便/你定"才用默认 `~/lifebrain`。
+- 路径必须是本机可写的绝对路径或 `~` 开头的路径。
+
+**第三步：确认后才初始化**
+
+```bash
+$LB init --data-dir "<用户确认的目录>"        # 不传就是 ~/lifebrain
+$LB init --data-dir "<目录>" --timezone Asia/Shanghai   # 可选：指定时区
+```
+
+`init` 会做四件事，输出 JSON 告诉你结果：
+1. 建目录结构 `journals/ projects/ reports/` 和 `projects.yaml`；
+2. 写固定配置文件 `~/lifebrain/config.yaml`（里面 `data_dir` 指向刚才的目录）；
+3. 建本周周文件，把今天标成「（无记录）」；
+4. 返回 `created` 列表和 `next_steps`。
+
+**第四步：回报 + 引导下一步**
+
+- 把 `data_dir` 用人话告诉用户："已经建好了，记录存在 `<目录>`。"
+- `initialized` 为 true 且是首次 → 告诉用户"已有记录，我直接接着用"。
+- `init` 返回 `next_steps` 里的三步（登记项目 / 记第一条 / 建每日提醒任务）要**逐个带用户走**，不要一口气甩三个问题。
+
+**安全约束**
+
+- 已初始化的目录再跑 `init` 是幂等的，不会覆盖数据。
+- 想换目录必须加 `--force`（只改配置，**不搬数据**），而且必须用户明确说"要换"才能做。
+- 配置文件位置永远是 `~/lifebrain/config.yaml`（固定"壳"），数据目录可以是任何地方。
+- 用户说"删掉重来"前不要动已有文件。
 
 ## 模式
 
@@ -125,8 +185,11 @@ $LB project add 健身 --category life --goal "保持体能"
 1. 先解析脚本路径：
    LB_SCRIPT="$(ls -d ~/.octop/agents/*/.octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
    [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d .octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
+   [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d ~/.octop/skill-packages/*/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
    两条都没命中就 find ~ -path '*skills/lifebrain/scripts/lifebrain.py' | head -1
 2. 运行 python3 "$LB_SCRIPT" status --lookback 3，读 JSON。
+2.5 若 status 里 initialized=false（用户还没确认数据目录）→ 只回一句「还没定记录放哪儿，回我一句我就给你建好」
+   然后结束；**不要自己建目录、不要写数据**。
 3. recorded=true → 只回一句「今天已经记过了 ✓」+ 今天的条目，不再问问题。
 4. recorded=false → 1-2 句话问「今天主要做了什么？大概多久？」，用户回复后用 append 写入
    （项目要先在 projects.yaml 登记；脚本会自动重建索引）。
@@ -152,6 +215,7 @@ octop --agent <AGENT_ID> cron create --trigger "cron:30 21 * * *" \
 
 ## 硬性规则
 
+- **数据目录由用户定**：首次使用必须先提议、拿到明确确认再 `init`；没确认前不建目录、不写盘。
 - 周文件是**唯一真相源**：任何数据只写进周文件，项目索引一律由脚本重算，**绝不直接编辑 `projects/*.md`**。
 - 条目行必须是合法结构化行，解析失败的行会在 rebuild 时被丢弃 —— 写完即跑脚本，确认 `dropped` 为空。
 - 项目必须先登记再写入；类别（work/life）决定报告里是否单独成节，别默认全当工作。

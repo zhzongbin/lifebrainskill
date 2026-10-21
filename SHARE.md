@@ -64,29 +64,63 @@ python3 ~/.octop/agents/<AGENT>/.octop/_builtin_skills/skill-manager/scripts/man
   install ./lifebrain-skill.zip
 ```
 
-自己重新打包：
+自己重新打包（不需要 `zip` 命令，只要 python3）：
 
 ```bash
-cd lifebrainskill && zip -r dist/lifebrain-skill.zip lifebrain -x '*/__pycache__/*'
+cd lifebrainskill && python3 make_zip.py      # → dist/lifebrain-skill.zip
 ```
 
 ---
 
 ## 场景 C：同一个 Octop 实例里的其他用户（共享包）
 
-Octop 有「全局技能包」机制（instance-global skill packages），实例内共享给其他用户：
+Octop 有「全局技能包」机制（instance-global skill packages），实例内共享给其他用户。
 
-1. 管理员在网页控制台 → 技能包 → 新建包（名字随意，例如 `日常记录`）。
-2. 把 `lifebrain-skill.zip` 上传进这个包，或用「从 URL 导入」指向 GitHub：
-   `POST /skill-packages/<package_id>/skills/import`，body `{"bundle_url": "https://github.com/zhzongbin/lifebrainskill/archive/refs/heads/main.zip"}`
-   （GitHub 的 zip 顶层是目录名，导入时若识别失败，先在网页端手动上传 ZIP。）
+**最快的做法（网页控制台）**：
+
+1. 网页控制台 → 技能包 → 新建包（名字随意，例如 `日常记录`）。
+2. 把 `lifebrain-skill.zip` 上传进这个包。
 3. 包属性里选 `copy_policy`：
    - `snapshot`：别人复制到工作区后是快照，可以自己改（推荐）
    - `lock`：锁定不可改
    - `deny`：不允许复制（就只当只读分发）
 4. 其他用户在控制台里从这个包**复制技能到自己的 workspace**，之后各自独立，互不影响。
 
-> 每个用户的数据目录都是自己的 `~/lifebrain`，不会串。
+**用 API 做（可脚本化）**：
+
+```bash
+BASE=http://127.0.0.1:8088
+TOKEN=<管理员 access token>
+
+# 1) 建包
+curl -s -X POST "$BASE/api/skill-packages" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"日常记录","description":"lifebrain 每日记录技能","copy_policy":"snapshot"}'
+
+# 2) 把技能文件塞进包里（content_base64 是文件内容的 base64）
+python3 - <<'PY' > /tmp/payload.json
+import base64, json, pathlib
+files = []
+for p in sorted(pathlib.Path("lifebrain").rglob("*")):
+    if p.is_file() and "__pycache__" not in p.parts:
+        files.append({"path": str(p.relative_to("lifebrain")),
+                      "content_base64": base64.b64encode(p.read_bytes()).decode()})
+print(json.dumps({"name": "lifebrain", "files": files, "overwrite": True}, ensure_ascii=False))
+PY
+curl -s -X POST "$BASE/api/skill-packages/<package_id>/skills" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  --data-binary @/tmp/payload.json
+
+# 3) 让某个 agent 用上这个包
+curl -s -X PATCH "$BASE/api/agents/<AGENT_ID>" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"skill_package_ids":["<package_id>"]}'
+```
+
+包里的技能挂到 agent 上后，会作为「全局共享技能」出现在所有挂了该包的 agent 的技能列表里；
+用户也可以在控制台里把它复制进自己的 workspace。
+
+> 每个用户的数据目录都是自己的 `~/lifebrain`，不会串；首次使用由各自的 agent 单独问过用户再初始化。
 
 ---
 
@@ -124,7 +158,7 @@ Octop 实例内也能从 SkillHub 搜到并装进共享包（控制台 → 技�
 - [ ] 脚本里没有写死任何人的用户名/agent id/会话 key
 - [ ] `scripts/lifebrain.py status` 在干净机器上能跑（只需要 python3；PyYAML 有就更好，没有会自动降级）
 - [ ] `scripts/__pycache__` 别打进包里
-- [ ] 对方的数据目录默认是 `~/lifebrain`，第一次运行会自动创建
+- [ ] 对方首次使用时 agent 会先问「记录放哪儿」，确认后才建目录；不需要预置 `~/lifebrain`
 
 ## 常见坑
 

@@ -63,7 +63,56 @@ octop --agent JVZG0K cron create \
 - 一次最多问 2 个问题，别把问答拆成 5 轮。
 - 没有新话题时也要给一句回应（"今天已经记过了 ✓"），不要静默。
 
-## 4. 排错
+## 5. 放进实例级全局技能包（技能共享池）
+
+Octop 的「全局技能包」是实例级的共享池：包里的技能可以挂给多个 agent，也可以让别的用户复制走。
+
+本机现状：包 `工作记录`（id `N9ZQ2T`），里面装着 `lifebrain`；`copy_policy=snapshot`，
+别人复制到自己的 workspace 后是独立快照。
+
+包内技能目录（挂载后 agent 直接可读，不需要复制到工作区）：
+
+```
+~/.octop/skill-packages/<包ID>/skills/lifebrain/SKILL.md
+~/.octop/skill-packages/<包ID>/skills/lifebrain/scripts/lifebrain.py
+```
+
+所以脚本路径解析里有一条例外：
+
+```bash
+[ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d ~/.octop/skill-packages/*/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
+```
+
+**用 API 更新包内技能**（本地管理员）：
+
+```bash
+TOKEN=<admin token>
+python3 - <<'PY' > /tmp/payload.json   # 把 lifebrain/ 下的文件打包成 API 需要的 base64 列表
+import base64, json, pathlib
+root = pathlib.Path("lifebrain")
+files = [{"path": str(p.relative_to(root)),
+          "content_base64": base64.b64encode(p.read_bytes()).decode()}
+         for p in sorted(root.rglob("*"))
+         if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc"]
+print(json.dumps({"name": "lifebrain", "files": files, "overwrite": True}, ensure_ascii=False))
+PY
+curl -s -X POST "http://127.0.0.1:8088/api/skill-packages/<包ID>/skills" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  --data-binary @/tmp/payload.json
+```
+
+**把包挂给某个 agent**：
+
+```bash
+curl -s -X PATCH "http://127.0.0.1:8088/api/agents/<AGENT_ID>" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"skill_package_ids":["<包ID>"]}'
+```
+
+注意：包内技能和 agent 工作区里的技能**同名时，包里的版本优先**。
+所以工作区那份是"给兜底脚本用的本地安装"，包里的那份是"全实例共用的最新版"——两边内容一致时没有歧义。
+
+## 6. 排错
 
 ```bash
 octop --agent JVZG0K cron list                 # 看定时任务

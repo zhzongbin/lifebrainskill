@@ -31,6 +31,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from rebuild_index import (  # noqa: E402
     DATE_HEAD,
     ENTRY,
+    config_home,
+    config_path,
+    data_dir_source,
     default_data_dir,
     read_yaml,
     rebuild,
@@ -46,7 +49,50 @@ STATUSES = ("active", "paused", "done")
 
 # ---------------------------------------------------------------- basics
 
+def _system_tz() -> str | None:
+    """Best-effort system timezone name (IANA-ish)."""
+    p = Path("/etc/timezone")
+    if p.exists():
+        try:
+            name = p.read_text(encoding="utf-8").strip()
+            if name:
+                return name
+        except OSError:
+            pass
+    try:
+        import time
+
+        return time.tzname[0] if time.tzname else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _tz_name() -> str | None:
+    """Timezone name: $LB_TIMEZONE > config.yaml:timezone > system local."""
+    env = os.environ.get("LB_TIMEZONE")
+    if env:
+        return env
+    cfg = config_path()
+    if cfg.exists():
+        try:
+            name = read_yaml(cfg).get("timezone")
+        except Exception:  # noqa: BLE001 - malformed config shouldn't crash reads
+            name = None
+        if name:
+            return str(name)
+    return None
+
+
 def now_local() -> datetime:
+    """Current time in the user's effective timezone (falls back to system local)."""
+    name = _tz_name()
+    if name:
+        try:
+            from zoneinfo import ZoneInfo
+
+            return datetime.now(ZoneInfo(name))
+        except Exception:  # noqa: BLE001 - unknown zone falls back to system time
+            pass
     return datetime.now()
 
 
@@ -211,21 +257,108 @@ def save_registry(root: Path, projects: dict) -> None:
 
 # ---------------------------------------------------------------- commands
 
+def _initialized(root: Path) -> bool:
+    """True when the data dir looks set up (journals dir + project registry)."""
+    return (root / "journals").is_dir() and registry_path(root).exists()
+
+
+def _source_for(args) -> str:
+    """Describe where the effective data dir came from."""
+    if getattr(args, "data_dir", None):
+        return "cli:--data-dir"
+    return data_dir_source()
+
+
 def cmd_config(args) -> int:
     root = Path(args.data_dir).expanduser() if args.data_dir else default_data_dir()
-    cfg_file = root / "config.yaml"
+    cfg_file = config_path()
     cfg = read_yaml(cfg_file) if cfg_file.exists() else {}
     out({
         "data_dir": str(root),
+        "data_dir_source": _source_for(args),
         "config_file": str(cfg_file),
         "config": cfg,
         "reminder_time": cfg.get("reminder_time"),
+        "timezone": cfg.get("timezone"),
+        "initialized": _initialized(root),
         "journals_dir": str(root / "journals"),
         "projects_file": str(registry_path(root)),
         "index_dir": str(root / "projects"),
         "reports_dir": str(root / "reports"),
         "agent_id": os.environ.get("LIFEBRAIN_AGENT", "JVZG0K"),
         "skill_dir": str(Path(__file__).resolve().parent.parent),
+    })
+    return 0
+
+
+def cmd_init(args) -> int:
+    """Create the data layout and write the config (data dir is user-chosen)."""
+    chosen = getattr(args, "init_data_dir", None) or args.data_dir
+    target = Path(chosen).expanduser() if chosen else config_home()
+    try:
+        target = target.resolve()
+    except OSError:
+        pass
+    cfg_file = config_path()
+    existing = read_yaml(cfg_file).get("data_dir") if cfg_file.exists() else None
+    if existing and not args.force:
+        if Path(str(existing)).expanduser().resolve() != target:
+            die(
+                f"已经初始化在 {existing}。要换目录请加 --force（只改配置，不会搬旧数据），"
+                f"或手工把 {existing} 里的文件挪过去",
+                3,
+            )
+
+    created: list[str] = []
+    for sub in ("", "journals", "projects", "reports"):
+        d = target / sub if sub else target
+        if not d.exists():
+            d.mkdir(parents=True, exist_ok=True)
+            created.append(str(d))
+    cfg_file.parent.mkdir(parents=True, exist_ok=True)
+    old_cfg = read_yaml(cfg_file) if cfg_file.exists() else {}
+    reminder = args.reminder_time or old_cfg.get("reminder_time") or "21:30"
+    tz_name = args.timezone or old_cfg.get("timezone")
+    if not tz_name:
+        tz_name = os.environ.get("LB_TIMEZONE") or _system_tz()
+    cfg_body = {"data_dir": str(target), "reminder_time": reminder}
+    if tz_name:
+        cfg_body["timezone"] = str(tz_name)
+    # 保留用户自己加的键，只覆盖我们管理的这几个
+    merged = dict(old_cfg)
+    merged.update(cfg_body)
+    body = "".join(f"{k}: {json.dumps(v, ensure_ascii=False) if isinstance(v, str) else v}\n"
+                   for k, v in merged.items())
+    cfg_file.write_text(body, encoding="utf-8")
+
+    reg = registry_path(target)
+    if not reg.exists():
+        reg.write_text("projects: {}\n", encoding="utf-8")
+        created.append(str(reg))
+
+    # 建本周周文件，把今天标成「无记录」，提醒流程才有锚点
+    today = now_local().date()
+    jp = journal_path(target, today)
+    if not jp.exists():
+        jp.write_text(
+            f"{week_header(iso_week(today))}\n\n## {today.isoformat()}\n{NO_ENTRY}\n",
+            encoding="utf-8",
+        )
+        created.append(str(jp))
+
+    out({
+        "ok": True,
+        "data_dir": str(target),
+        "config_file": str(cfg_file),
+        "created": created,
+        "reminder_time": reminder,
+        "timezone": tz_name,
+        "initialized": _initialized(target),
+        "next_steps": [
+            "登记项目：lifebrain.py project add <名称> --category work|life --goal \"一句话目标\"",
+            "记第一条：lifebrain.py append --project <名称> --duration 1h --content \"做了什么\"",
+            "建每日提醒任务（投递到聊天通道）：在聊天里让 agent 用 cronjob_create 建 cron:30 21 * * *",
+        ],
     })
     return 0
 
@@ -249,6 +382,8 @@ def cmd_status(args) -> int:
     marker = root / f".reminder-{target.isoformat()}"
     out({
         "data_dir": str(root),
+        "data_dir_source": _source_for(args),
+        "initialized": _initialized(root),
         "date": target.isoformat(),
         "today": today.isoformat(),
         "week": iso_week(target),
@@ -443,7 +578,7 @@ def cmd_report(args) -> int:
 
     recorded_dates = sorted({e["date"] for e in sel})
     empty_dates: list[str] = []
-    today_iso = date_cls.today().isoformat()
+    today_iso = now_local().date().isoformat()
     if "week" in scope:
         monday, sunday = week_bounds(scope["week"])
         d = monday
@@ -484,7 +619,7 @@ def cmd_mark_reminder(args) -> int:
     target = parse_date(args.date) if args.date else now_local().date()
     root.mkdir(parents=True, exist_ok=True)
     marker = root / f".reminder-{target.isoformat()}"
-    marker.write_text(datetime.now().isoformat(timespec="seconds"), encoding="utf-8")
+    marker.write_text(now_local().isoformat(timespec="seconds"), encoding="utf-8")
     out({"ok": True, "marker": str(marker), "date": target.isoformat()})
     return 0
 
@@ -497,6 +632,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("config", help="打印数据目录与配置").set_defaults(func=cmd_config)
+
+    p = sub.add_parser("init", help="初始化数据目录（需用户确认后调用）")
+    p.add_argument("--data-dir", dest="init_data_dir", default=None,
+                   help="用户确认的数据目录，默认 ~/lifebrain")
+    p.add_argument("--reminder-time", default=None, help="每日提醒时间 HH:MM，默认 21:30")
+    p.add_argument("--timezone", default=None, help="IANA 时区，如 Asia/Shanghai；默认取系统时区")
+    p.add_argument("--force", action="store_true", help="允许改写已有配置里的 data_dir")
+    p.set_defaults(func=cmd_init)
 
     p = sub.add_parser("status", help="查询某天是否已记录、缺失日期、项目表")
     p.add_argument("--date", default=None, help="YYYY-MM-DD，默认今天")

@@ -5,22 +5,31 @@
 
 ## 目录
 ```
-~/lifebrain/
-  config.yaml          # data_dir, reminder_time
-  projects.yaml        # 项目注册表
-  journals/2026-W43.md # 周文件（唯一真相源，ISO 周命名）
-  projects/<name>.md   # 项目索引（脚本重算，只读）
-  reports/             # 周报月报存档
-  .reminder-YYYY-MM-DD # 当天提醒已发 marker（防止重复打扰）
+~/lifebrain/                # 配置壳（位置固定）
+  config.yaml               # data_dir / reminder_time / timezone
+<数据目录>/                  # 默认 ~/lifebrain，可被 config.yaml:data_dir 指到别处
+  projects.yaml             # 项目注册表
+  journals/2026-W43.md      # 周文件（唯一真相源，ISO 周命名）
+  projects/<name>.md        # 项目索引（脚本重算，只读）
+  reports/                  # 周报月报存档
+  .reminder-YYYY-MM-DD      # 当天提醒已发 marker（防止重复打扰）
 ```
 
 ## config.yaml
+
+**位置固定在 `~/lifebrain/config.yaml`**（不随数据目录移动），里面的 `data_dir` 指向真正的数据目录。
+
 ```yaml
-data_dir: ~/lifebrain
-reminder_time: "21:30"   # 仅供人读；实际调度在 Octop cron / crontab
+data_dir: ~/lifebrain      # 数据目录，可指向任意本机可写路径
+reminder_time: "21:30"     # 仅供人读；实际调度在 Octop cron / crontab
+timezone: "Asia/Shanghai"  # 可选；决定"今天"是哪天（默认取系统时区）
 ```
 
 优先级：环境变量 `LB_DATA_DIR` > `config.yaml:data_dir` > `~/lifebrain`。
+时区优先级：`LB_TIMEZONE` > `config.yaml:timezone` > 系统时区。
+
+首次使用必须由用户确认数据目录后，用 `lifebrain.py init --data-dir <目录>` 生成，
+不要手工建目录、也不要手工写这个配置文件。
 
 ## projects.yaml
 ```yaml

@@ -46,8 +46,11 @@ PROMPT_TEMPLATE="$(cat <<'EOF'
 1. 先解析脚本路径：
    LB_SCRIPT="$(ls -d ~/.octop/agents/*/.octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
    [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d .octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
+   [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d ~/.octop/skill-packages/*/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
    两条都没命中就 find ~ -path '*skills/lifebrain/scripts/lifebrain.py' | head -1
 2. 运行 python3 "$LB_SCRIPT" status --lookback 3，读 JSON。
+2.5 若 status 里 initialized=false（用户还没确认数据目录）→ 只回一句「还没定记录放哪儿，回我一句我就给你建好」
+   然后结束；不要自己建目录、不要写数据。
 3. recorded=true → 只回一句「今天已经记过了 ✓」+ 今天的条目，不再问问题。
 4. recorded=false → 1-2 句话问「今天主要做了什么？大概多久？」，用户回复后用 append 写入
    （项目要先在 projects.yaml 登记；脚本会自动重建索引）。
