@@ -27,6 +27,8 @@ except ImportError:
 ENTRY = re.compile(r"^- (\d{2}:\d{2}|--:--) \| ([^|]+) \| ([^|]+) \| ([\d.]+[hm]) \| (.+)$")
 HOURS = re.compile(r"([\d.]+)h")
 DATE_HEAD = re.compile(r"^## (\d{4}-\d{2}-\d{2})\s*$")
+# 待办引用：条目行可选的第 6 段，形如 `- 09:30 | web | 开发 | 2h | 做事 | t3`
+TODO_REF = re.compile(r"^t\d+$")
 
 
 def config_home() -> Path:
@@ -108,15 +110,46 @@ def mini_yaml_load(text: str) -> dict:
 
 
 def to_hours(dur: str) -> float:
-    m = HOURS.match(dur)
+    """Parse a duration like ``2h`` / ``90m`` / ``2`` (bare number = hours)."""
+    s = str(dur).strip()
+    m = HOURS.match(s)
     if m:
         return float(m.group(1))
-    return float(dur.rstrip("m")) / 60.0
+    if s.endswith("m"):
+        try:
+            return float(s[:-1]) / 60.0
+        except ValueError:
+            return 0.0
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
 
 
-def parse_journal(text: str) -> tuple[dict[str, list[tuple[str, str, str, str, str]]], list[tuple[int, str]]]:
+def split_entry_line(line: str) -> tuple[str, str, str, str, str, str] | None:
+    """Parse one journal entry line into (time, project, type, duration, content, todo_id).
+
+    The 6th field (todo id, e.g. ``t3``) is optional and only recognised when the
+    trailing segment looks exactly like ``t<digits>`` — older 5-field lines keep
+    working untouched.
+    """
+    m = ENTRY.match(line)
+    if not m:
+        return None
+    time_s, project, type_s, duration, rest = (
+        m.group(1), m.group(2).strip(), m.group(3).strip(), m.group(4), m.group(5)
+    )
+    todo_id = ""
+    if " | " in rest:
+        head, _, tail = rest.rpartition(" | ")
+        if head and TODO_REF.match(tail.strip()):
+            rest, todo_id = head, tail.strip()
+    return time_s, project, type_s, duration, rest, todo_id
+
+
+def parse_journal(text: str) -> tuple[dict[str, list[tuple[str, str, str, str, str, str]]], list[tuple[int, str]]]:
     """Return (date -> entries, dropped_lines) for one weekly journal."""
-    by_date: dict[str, list[tuple[str, str, str, str, str]]] = defaultdict(list)
+    by_date: dict[str, list[tuple[str, str, str, str, str, str]]] = defaultdict(list)
     dropped: list[tuple[int, str]] = []
     date = None
     for lineno, line in enumerate(text.splitlines(), start=1):
@@ -124,9 +157,9 @@ def parse_journal(text: str) -> tuple[dict[str, list[tuple[str, str, str, str, s
         if m:
             date = m.group(1)
             continue
-        m = ENTRY.match(line)
-        if m and date:
-            by_date[date].append((m.group(1), m.group(2).strip(), m.group(3).strip(), m.group(4), m.group(5)))
+        parsed = split_entry_line(line)
+        if parsed and date:
+            by_date[date].append(parsed)
         elif line.startswith("- ") and "无记录" not in line:
             dropped.append((lineno, line))
     return dict(by_date), dropped
@@ -155,7 +188,6 @@ def rebuild(root: Path, *, registry: dict | None = None) -> dict:
         for date, entries in by_date.items():
             for entry in entries:
                 timeline[entry[1]][week].append((date, *entry))
-
     out_dir = root / "projects"
     out_dir.mkdir(parents=True, exist_ok=True)
     generated: list[str] = []
@@ -169,8 +201,9 @@ def rebuild(root: Path, *, registry: dict | None = None) -> dict:
         for week in sorted(weeks):
             lines.append(f"## {week}")
             whours = 0.0
-            for date, t, _proj, typ, dur, content in weeks[week]:
-                lines.append(f"- {date} {t} | {typ} | {dur} | {content}")
+            for date, t, _proj, typ, dur, content, todo_id in weeks[week]:
+                mark = f" [{todo_id}]" if todo_id else ""
+                lines.append(f"- {date} {t} | {typ} | {dur} | {content}{mark}")
                 whours += to_hours(dur)
             lines += ["", f"小计: {whours:.1f}h", ""]
             total += whours

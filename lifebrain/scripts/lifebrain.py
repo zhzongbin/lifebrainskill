@@ -31,17 +31,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from rebuild_index import (  # noqa: E402
     DATE_HEAD,
     ENTRY,
+    TODO_REF,
     config_home,
     config_path,
     data_dir_source,
     default_data_dir,
     read_yaml,
     rebuild,
+    split_entry_line,
     to_hours,
 )
 
 TIME_RE = re.compile(r"^(\d{2}:\d{2}|--:--)$")
 DUR_RE = re.compile(r"^[\d.]+[hm]$")
+ESTIMATE_RE = re.compile(r"^(\d+(?:\.\d+)?)([hmd])?$", re.IGNORECASE)
 NO_ENTRY = "（无记录）"
 CATEGORIES = ("work", "life")
 STATUSES = ("active", "paused", "done")
@@ -177,8 +180,8 @@ def render_journal(preamble: list[str], sections: list[tuple[str, list[str]]]) -
 
 
 def entry_time_key(line: str) -> str:
-    m = ENTRY.match(line)
-    return m.group(1) if m else "99:99"
+    parsed = split_entry_line(line)
+    return parsed[0] if parsed else "99:99"
 
 
 def read_entries(root: Path) -> list[dict]:
@@ -192,17 +195,19 @@ def read_entries(root: Path) -> list[dict]:
             if m:
                 cur = m.group(1)
                 continue
-            m = ENTRY.match(line)
-            if m and cur:
+            parsed = split_entry_line(line)
+            if parsed and cur:
+                time_s, project, type_s, duration, content, todo_id = parsed
                 entries.append({
                     "date": cur,
                     "week": week,
-                    "time": m.group(1),
-                    "project": m.group(2).strip(),
-                    "type": m.group(3).strip(),
-                    "duration": m.group(4),
-                    "hours": round(to_hours(m.group(4)), 3),
-                    "content": m.group(5),
+                    "time": time_s,
+                    "project": project,
+                    "type": type_s,
+                    "duration": duration,
+                    "hours": round(to_hours(duration), 3),
+                    "content": content,
+                    "todo": todo_id or None,
                 })
     entries.sort(key=lambda e: (e["date"], e["time"]))
     return entries
@@ -216,7 +221,7 @@ def date_has_entries(root: Path, d: date_cls) -> bool:
     _, sections = parse_sections(text)
     for sdate, lines in sections:
         if sdate == d.isoformat():
-            return any(ENTRY.match(l) for l in lines)
+            return any(split_entry_line(l) for l in lines)
     return False
 
 
@@ -279,9 +284,11 @@ def save_todos(root: Path, todos: dict) -> None:
     p = todos_path(root)
     p.parent.mkdir(parents=True, exist_ok=True)
     lines = ["todos:"]
+    fields = ("content", "goal", "project", "estimate", "due", "created",
+              "status", "done_at", "note")
     for tid, todo in todos.items():
         lines.append(f"  {tid}:")
-        for k in ("content", "project", "due", "created", "status", "done_at"):
+        for k in fields:
             v = (todo or {}).get(k)
             if v in (None, ""):
                 continue
@@ -306,12 +313,96 @@ def _todo_public(tid: str, todo: dict) -> dict:
     return t
 
 
+def _todo_hours(root: Path, entries: list[dict]) -> dict[str, float]:
+    """Actual hours per todo id, summed from journal entries tagged with it."""
+    out_hours: dict[str, float] = {}
+    for e in entries:
+        tid = e.get("todo")
+        if not tid:
+            continue
+        out_hours[tid] = round(out_hours.get(tid, 0.0) + float(e.get("hours") or 0.0), 3)
+    return out_hours
+
+
+def _estimate_hours(value) -> float | None:
+    """Parse an effort estimate into hours. Supports ``8h`` / ``90m`` / ``2d`` / ``2`` (hours).
+
+    Returns None when the value is not a valid estimate so callers can reject it
+    instead of silently treating garbage as 0h.
+    """
+    if value in (None, ""):
+        return None
+    s = str(value).strip()
+    m = ESTIMATE_RE.match(s)
+    if not m:
+        return None
+    num = float(m.group(1))
+    unit = (m.group(2) or "h").lower()
+    if unit == "h":
+        return round(num, 2)
+    if unit == "m":
+        return round(num / 60.0, 2)
+    return round(num * 8.0, 2)  # d = 天，按 8h/天折算
+
+
+def _todo_stats(tid: str, todo: dict, entries: list[dict], today: date_cls) -> dict:
+    """One todo with goal-aware analysis: actual vs planned, overdue, roll-over."""
+    t = _todo_public(tid, todo)
+    actual = 0.0
+    logged = 0
+    mine: list[dict] = []
+    for e in entries:
+        if e.get("todo") == tid:
+            actual += float(e.get("hours") or 0.0)
+            logged += 1
+            mine.append(e)
+    t["actual_hours"] = round(actual, 2)
+    t["logged_entries"] = logged
+    t["last_activity"] = mine[-1]["date"] if mine else None
+    t["last_progress"] = mine[-1]["content"] if mine else None
+    t["last_progress_time"] = mine[-1]["time"] if mine else None
+    t["recent_entries"] = [
+        {"date": e["date"], "time": e["time"], "duration": e["duration"], "content": e["content"]}
+        for e in mine[-3:]
+    ]
+    t["active_dates"] = sorted({e["date"] for e in mine})[-3:] if mine else []
+    est = (todo or {}).get("estimate")
+    t["planned_hours"] = _estimate_hours(est)
+    t["estimate"] = est or None
+    if t.get("planned_hours") is not None:
+        gap = round(t["planned_hours"] - t["actual_hours"], 2)
+        t["hours_gap"] = gap
+        t["hours_gap_note"] = ("还差 %.1fh" % gap) if gap > 0 else ("超了 %.1fh" % -gap)
+    else:
+        t["hours_gap"] = None
+        t["hours_gap_note"] = ""
+    due = (todo or {}).get("due")
+    t["overdue_days"] = 0
+    if due and t.get("status") == "pending":
+        try:
+            d = parse_date(str(due))
+            t["overdue_days"] = max(0, (today - d).days)
+        except ValueError:
+            pass
+    created = (todo or {}).get("created")
+    t["age_days"] = 0
+    if created:
+        try:
+            t["age_days"] = max(0, (today - parse_date(str(created))).days)
+        except ValueError:
+            pass
+    t["rolled_over"] = t["overdue_days"] > 0
+    return t
+
+
 def cmd_todo(args) -> int:
     """Manage the todo list that drives the morning reminder."""
     root = Path(args.data_dir).expanduser() if args.data_dir else default_data_dir()
     todos = load_todos(root)
+    entries = read_entries(root)
     action = args.action
     todo_id = args.id or getattr(args, "id_pos", None)
+    today = now_local().date()
 
     if action == "add":
         content = (args.content or "").strip()
@@ -323,10 +414,23 @@ def cmd_todo(args) -> int:
         todo = {
             "content": content,
             "status": "pending",
-            "created": now_local().date().isoformat(),
+            "created": today.isoformat(),
         }
+        if args.goal:
+            todo["goal"] = args.goal.strip()
         if args.project:
+            registry = load_registry(root)
+            if registry and args.project not in registry:
+                die(
+                    f"项目 {args.project!r} 未在 projects.yaml 登记。"
+                    f"先登记：lifebrain.py project add {args.project} --category work|life --goal \"一句话目标\"",
+                    3,
+                )
             todo["project"] = args.project
+        if args.estimate:
+            if _estimate_hours(args.estimate) is None:
+                die(f"--estimate 格式应为 8h / 2d / 4，收到 {args.estimate!r}", 2)
+            todo["estimate"] = args.estimate
         if args.due:
             todo["due"] = parse_date(args.due).isoformat()
         todos[tid] = todo
@@ -338,13 +442,16 @@ def cmd_todo(args) -> int:
         want = args.status or "pending"
         items = []
         for tid, todo in todos.items():
-            t = _todo_public(tid, todo)
+            t = _todo_stats(tid, todo, entries, today)
             if want != "all" and t.get("status") != want:
                 continue
             if args.project and t.get("project") != args.project:
                 continue
             items.append(t)
-        items.sort(key=lambda t: (t.get("status") != "pending", t.get("due") or "9999", t.get("created") or ""))
+        items.sort(key=lambda t: (t.get("status") != "pending",
+                                  -(t.get("overdue_days") or 0),
+                                  t.get("due") or "9999",
+                                  t.get("created") or ""))
         out({
             "todos": items,
             "count": len(items),
@@ -359,9 +466,37 @@ def cmd_todo(args) -> int:
         if tid not in todos:
             die(f"没有这个 todo：{tid}", 2)
         todos[tid]["status"] = "done"
-        todos[tid]["done_at"] = now_local().date().isoformat()
+        todos[tid]["done_at"] = today.isoformat()
+        if args.note:
+            todos[tid]["note"] = args.note
         save_todos(root, todos)
-        out({"ok": True, "action": "done", "id": tid, "todo": _todo_public(tid, todos[tid])})
+        stat = _todo_stats(tid, todos[tid], entries, today)
+        out({"ok": True, "action": "done", "id": tid, "todo": stat})
+        return 0
+
+    if action == "update":
+        tid = todo_id
+        if not tid or tid not in todos:
+            die(f"没有这个 todo：{tid}", 2)
+        todo = dict(todos[tid] or {})
+        if args.content:
+            todo["content"] = args.content.strip()
+        if args.goal is not None:
+            todo["goal"] = args.goal.strip()
+        if args.project:
+            todo["project"] = args.project
+        if args.estimate is not None:
+            if _estimate_hours(args.estimate) is None:
+                die(f"--estimate 格式应为 8h / 2d / 4，收到 {args.estimate!r}", 2)
+            todo["estimate"] = args.estimate
+        if args.due:
+            todo["due"] = parse_date(args.due).isoformat()
+        if args.note is not None:
+            todo["note"] = args.note
+        todos[tid] = todo
+        save_todos(root, todos)
+        out({"ok": True, "action": "update", "id": tid,
+             "todo": _todo_stats(tid, todo, entries, today)})
         return 0
 
     if action == "rm":
@@ -371,6 +506,70 @@ def cmd_todo(args) -> int:
         removed = todos.pop(tid)
         save_todos(root, todos)
         out({"ok": True, "action": "rm", "id": tid, "removed": _todo_public(tid, removed)})
+        return 0
+
+    if action == "review":
+        days = max(1, int(args.days or 7))
+        since = today - timedelta(days=days - 1)
+        stats = [_todo_stats(tid, todo, entries, today) for tid, todo in todos.items()]
+        pending = [t for t in stats if t.get("status") == "pending"]
+        done = [t for t in stats if t.get("status") == "done"]
+        pending.sort(key=lambda t: (-(t.get("overdue_days") or 0),
+                                     t.get("due") or "9999",
+                                     t.get("created") or ""))
+        done.sort(key=lambda t: (t.get("done_at") or "", t.get("created") or ""), reverse=True)
+
+        planned = sum(t["planned_hours"] for t in pending if t.get("planned_hours"))
+        actual = sum(t["actual_hours"] for t in pending)
+        by_project: dict[str, dict] = {}
+        for t in pending:
+            key = t.get("project") or "（未归类）"
+            slot = by_project.setdefault(key, {"pending": 0, "planned_hours": 0.0, "actual_hours": 0.0, "todos": []})
+            slot["pending"] += 1
+            slot["planned_hours"] = round(slot["planned_hours"] + (t.get("planned_hours") or 0.0), 2)
+            slot["actual_hours"] = round(slot["actual_hours"] + (t.get("actual_hours") or 0.0), 2)
+            slot["todos"].append(t["id"])
+
+        recent_entries = [e for e in entries if e["date"] >= since.isoformat()]
+        recent_hours = round(sum(float(e.get("hours") or 0.0) for e in recent_entries), 2)
+
+        notes: list[str] = []
+        overdue = [t for t in pending if t.get("overdue_days")]
+        if overdue:
+            worst = overdue[0]
+            notes.append(f"{worst['id']}「{worst['content']}」已逾期 {worst['overdue_days']} 天"
+                         f"（建于 {worst.get('created')}）")
+        stale = [t for t in pending if (t.get("age_days") or 0) >= 3 and not t.get("logged_entries")]
+        if stale:
+            notes.append(f"{len(stale)} 条待办建了 3 天以上还没动过："
+                         + "、".join(t["id"] for t in stale[:3]))
+        if planned and actual < planned * 0.5:
+            notes.append(f"待办预计共 {planned:.1f}h，实际只投入 {actual:.1f}h")
+        done_today = [t for t in done if t.get("done_at") == today.isoformat()]
+        if done_today:
+            notes.append("今天已完成：" + "、".join(t["id"] for t in done_today[:3]))
+
+        out({
+            "scope": {"days": days, "from": since.isoformat(), "to": today.isoformat()},
+            "today": today.isoformat(),
+            "summary": {
+                "total": len(stats),
+                "pending": len(pending),
+                "done": len(done),
+                "overdue": len(overdue),
+                "completion_rate": round(len(done) / len(stats), 3) if stats else 0.0,
+                "planned_hours": round(planned, 2),
+                "actual_hours": round(actual, 2),
+                "recent_logged_hours": recent_hours,
+                "recent_entries": len(recent_entries),
+            },
+            "today_focus": [t["id"] for t in pending[:3]],
+            "focus_detail": pending[:3],
+            "pending": pending,
+            "recent_done": done[:5],
+            "by_project": by_project,
+            "notes": notes,
+        })
         return 0
 
     die(f"未知 todo 动作：{action}", 2)
@@ -508,11 +707,14 @@ def cmd_status(args) -> int:
     today = now_local().date()
     marker = root / f".reminder-{target.isoformat()}"
     todos = load_todos(root)
+    all_entries = read_entries(root)
     pending = [
-        _todo_public(tid, t) for tid, t in todos.items()
+        _todo_stats(tid, t, all_entries, today) for tid, t in todos.items()
         if (t or {}).get("status", "pending") == "pending"
     ]
-    pending.sort(key=lambda t: (t.get("due") or "9999", t.get("created") or ""))
+    pending.sort(key=lambda t: (-(t.get("overdue_days") or 0),
+                                t.get("due") or "9999",
+                                t.get("created") or ""))
     out({
         "data_dir": str(root),
         "data_dir_source": _source_for(args),
@@ -523,7 +725,7 @@ def cmd_status(args) -> int:
         "week_file": str(journal_path(root, target)),
         "week_file_exists": journal_path(root, target).exists(),
         "recorded": date_has_entries(root, target),
-        "entries": [e for e in read_entries(root) if e["date"] == target.isoformat()],
+        "entries": [e for e in all_entries if e["date"] == target.isoformat()],
         "missing_dates": missing,
         "lookback": lookback,
         "projects": registry,
@@ -552,7 +754,7 @@ def cmd_show(args) -> int:
 
 
 def _validate_entry(time_s: str, project: str, type_s: str, duration: str, content: str,
-                    registry: dict) -> tuple[str, str, str, str, str]:
+                    registry: dict, todo_id: str = "") -> tuple[str, str, str, str, str, str]:
     if not TIME_RE.match(time_s):
         die(f"时间格式应为 HH:MM 或 --:--，收到 {time_s!r}", 2)
     if not DUR_RE.match(duration):
@@ -567,29 +769,44 @@ def _validate_entry(time_s: str, project: str, type_s: str, duration: str, conte
             f"先登记：lifebrain.py project add {project} --category work|life --goal \"一句话目标\"",
             3,
         )
-    return time_s, project, type_s, duration, content.strip()
+    if todo_id and not TODO_REF.match(todo_id):
+        die(f"todo 引用应为 t<数字>，收到 {todo_id!r}", 2)
+    return time_s, project, type_s, duration, content.strip(), todo_id
 
 
 def cmd_append(args) -> int:
     root = Path(args.data_dir).expanduser() if args.data_dir else default_data_dir()
     target = parse_date(args.date) if args.date else now_local().date()
     registry = load_registry(root)
+    todos = load_todos(root)
 
-    raw: list[tuple[str, str, str, str, str]] = []
+    raw: list[tuple[str, str, str, str, str, str]] = []
     if args.entry:
         for item in args.entry:
             parts = item.split("|")
-            if len(parts) != 5:
-                die(f"--entry 必须是 5 段 'HH:MM|项目|类型|时长|内容'，收到 {item!r}", 2)
-            raw.append(tuple(p.strip() for p in parts))  # type: ignore[arg-type]
+            if len(parts) == 5:
+                raw.append((*(p.strip() for p in parts), ""))  # type: ignore[arg-type]
+            elif len(parts) == 6:
+                todo_ref = parts[5].strip()
+                if not TODO_REF.match(todo_ref):
+                    die(f"--entry 第 6 段必须是 t<数字> 的 todo 引用，收到 {todo_ref!r}", 2)
+                raw.append((*(p.strip() for p in parts[:5]), todo_ref))
+            else:
+                die(f"--entry 必须是 5 段 'HH:MM|项目|类型|时长|内容'（可选第 6 段 todo 引用），收到 {item!r}", 2)
     else:
         if not (args.project and args.duration and args.content):
             die("append 需要 --entry 重复参数，或 --project/--duration/--content 三件套（--type 可选）", 2)
         time_s = args.time or now_local().strftime("%H:%M")
         type_s = args.type or "记录"
-        raw.append((time_s, args.project, type_s, args.duration, args.content))
+        raw.append((time_s, args.project, type_s, args.duration, args.content, (args.todo or "").strip()))
 
-    entries = [_validate_entry(*r, registry) for r in raw]
+    # 注意：不能写成 _validate_entry(*r, registry) —— CPython 会把 registry
+    # 绑定到下一个位置参数（todo_id），导致项目校验拿着 todo id 当注册表。
+    entries = [_validate_entry(r[0], r[1], r[2], r[3], r[4], registry, r[5]) for r in raw]
+
+    for (_t, _p, _ty, _d, _c, tid) in entries:
+        if tid and tid not in todos:
+            die(f"todo {tid} 不存在；先建：lifebrain.py todo add --content \"…\"", 3)
 
     path = journal_path(root, target)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -601,7 +818,12 @@ def cmd_append(args) -> int:
     preamble, sections = parse_sections(text)
 
     key = target.isoformat()
-    entry_lines = [f"- {t} | {p} | {ty} | {d} | {c}" for (t, p, ty, d, c) in entries]
+    entry_lines = []
+    for (t, p, ty, d, c, tid) in entries:
+        line = f"- {t} | {p} | {ty} | {d} | {c}"
+        if tid:
+            line += f" | {tid}"
+        entry_lines.append(line)
 
     found = False
     for idx, (sdate, lines) in enumerate(sections):
@@ -627,8 +849,9 @@ def cmd_append(args) -> int:
 
     result = {"ok": True, "date": key, "week": week, "file": str(path),
               "appended": len(entries),
-              "entries": [{"time": t, "project": p, "type": ty, "duration": d, "content": c}
-                          for (t, p, ty, d, c) in entries]}
+              "entries": [{"time": t, "project": p, "type": ty, "duration": d, "content": c,
+                           "todo": tid or None}
+                          for (t, p, ty, d, c, tid) in entries]}
     if not args.no_rebuild:
         rb = rebuild(root)
         result["rebuild"] = {"generated": rb.get("generated", []),
@@ -706,9 +929,42 @@ def cmd_report(args) -> int:
         p["hours"] = round(p["hours"] + e["hours"], 3)
         p["count"] += 1
         p["entries"].append({"date": e["date"], "time": e["time"], "type": e["type"],
-                             "duration": e["duration"], "content": e["content"]})
+                             "duration": e["duration"], "content": e["content"],
+                             "todo": e.get("todo")})
     for p in by_project.values():
         p["hours"] = round(p["hours"], 1)
+
+    by_todo: dict[str, dict] = {}
+    for e in sel:
+        tid = e.get("todo")
+        if not tid:
+            continue
+        slot = by_todo.setdefault(tid, {"hours": 0.0, "count": 0, "entries": [],
+                                        "project": None, "content": None,
+                                        "goal": None, "last_date": None, "last_progress": None})
+        slot["hours"] = round(slot["hours"] + e["hours"], 3)
+        slot["count"] += 1
+        slot["entries"].append({"date": e["date"], "time": e["time"], "type": e["type"],
+                                 "duration": e["duration"], "content": e["content"]})
+        slot["project"] = e["project"]
+        slot["last_date"] = e["date"]
+        slot["last_progress"] = e["content"]
+
+    todos = load_todos(root)
+    today = now_local().date()
+    for tid, slot in by_todo.items():
+        todo = todos.get(tid) or {}
+        slot["content"] = todo.get("content")
+        slot["goal"] = todo.get("goal")
+        slot["status"] = todo.get("status", "pending")
+        slot["due"] = todo.get("due")
+        slot["overdue_days"] = 0
+        if slot["due"] and slot["status"] == "pending":
+            try:
+                slot["overdue_days"] = max(0, (today - parse_date(str(slot["due"]))).days)
+            except ValueError:
+                pass
+        slot["hours"] = round(slot["hours"], 1)
 
     recorded_dates = sorted({e["date"] for e in sel})
     empty_dates: list[str] = []
@@ -733,6 +989,8 @@ def cmd_report(args) -> int:
         "total_hours": round(sum(p["hours"] for p in by_project.values()), 1),
         "total_entries": len(sel),
         "by_project": by_project,
+        "by_todo": by_todo,
+        "todo_hours": round(sum(t["hours"] for t in by_todo.values()), 1),
         "recorded_dates": recorded_dates,
         "empty_dates": empty_dates,
     })
@@ -793,7 +1051,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--type", default=None, help="类型短语，如 开发/会议/生活")
     p.add_argument("--duration", default=None, help="2h / 30m / 1.5h")
     p.add_argument("--content", default=None)
-    p.add_argument("--entry", action="append", default=None, help="重复使用：'HH:MM|项目|类型|时长|内容'")
+    p.add_argument("--todo", default=None, help="关联目标 id（t1）；该条即视为此目标的进展记录")
+    p.add_argument("--entry", action="append", default=None,
+                   help="重复使用：'HH:MM|项目|类型|时长|内容[|t1]'")
     p.add_argument("--no-rebuild", action="store_true")
     p.set_defaults(func=cmd_append)
 
@@ -814,15 +1074,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("rebuild", help="重建项目索引").set_defaults(func=cmd_rebuild)
 
-    p = sub.add_parser("todo", help="待办清单（早间提醒用）")
-    p.add_argument("action", choices=["add", "list", "done", "rm"])
-    p.add_argument("id_pos", nargs="?", default=None, help="待办 id（done/rm 时必填）")
+    p = sub.add_parser("todo", help="目标清单（早间提醒用）")
+    p.add_argument("action", choices=["add", "list", "done", "rm", "update", "review"])
+    p.add_argument("id_pos", nargs="?", default=None, help="待办 id（done/rm/update 时必填）")
     p.add_argument("--content", default=None, help="待办内容（add 时必填）")
-    p.add_argument("--id", dest="id", default=None, help="待办 id（done/rm 时必填）")
+    p.add_argument("--id", dest="id", default=None, help="待办 id")
     p.add_argument("--project", default=None, help="关联项目")
+    p.add_argument("--goal", default=None, help="目标定义：达成后是什么样子")
+    p.add_argument("--estimate", default=None, help="预计投入时长，如 8h / 2d")
     p.add_argument("--due", default=None, help="期望完成日期 YYYY-MM-DD")
+    p.add_argument("--note", default=None, help="完成/更新备注")
     p.add_argument("--status", default=None, choices=["pending", "done", "all"],
                    help="list 时筛选，默认 pending")
+    p.add_argument("--days", type=int, default=7, help="review 时回看天数，默认 7")
     p.set_defaults(func=cmd_todo)
 
     p = sub.add_parser("mark-reminder", help="写下今日提醒已触发的标记（防重复）")

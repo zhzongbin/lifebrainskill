@@ -9,7 +9,7 @@ lifebrain/                 ← 这才是「一个 skill 目录」，SKILL.md 在
   SKILL.md
   references/format.md     ← 数据格式规约
   references/octop-setup.md← Octop 运行时细节（通道投递、时区、兜底）
-  scripts/lifebrain.py     ← 核心 CLI（status/show/append/project/report/rebuild/mark-reminder）
+  scripts/lifebrain.py     ← 核心 CLI（status/show/append/project/report/rebuild/mark-reminder/todo）
   scripts/rebuild_index.py ← 项目索引重算
   scripts/reminder.sh      ← Octop 版提醒入口（system cron → octop cron run-now）
   scripts/reminder_omp.sh  ← 原 omp 无头 CLI 版（其他 agent 运行时用）
@@ -41,7 +41,7 @@ bash lifebrainskill/lifebrain/scripts/install_octop.sh --agent <AGENT_ID>
 
 - 想让提醒推到**微信/QQ**：在聊天窗口里跟自己的 agent 说「用 lifebrain 技能建一个每天 21:30 的提醒任务」——
   agent 用 `cronjob_create` 建的任务会**自动绑定当前通道**，结果推回那里。
-- 想要早上的待办提醒，再建一条（早 7:30，推今天的 todo）：
+- 想要早上的目标提醒，再建一条（早 7:30，推今天的目标 + 最近进展 + 累计投入）：
   「用 lifebrain 技能建一个每天早上 7:30 的待办提醒任务」。
 - 用 CLI 建的任务会绑到 dashboard（网页控制台），且需要 `octop service restart` 才被调度器加载：
   ```bash
@@ -175,3 +175,5 @@ Octop 实例内也能从 SkillHub 搜到并装进共享包（控制台 → 技�
 | CLI 建的任务不触发 | 写的是本地 DB，服务没重载 | `octop service restart`，或改用聊天里建 |
 | 提醒来两次 | 调度器 + 兜底 crontab 都发了 | 靠 `mark-reminder` 的 marker 去重，别删兜底脚本 |
 | agent 报「项目未登记」 | 写入前项目没进 `projects.yaml` | 先 `$LB project add <名> --category work|life --goal "…"` |
+| agent 报「todo tN 不存在」 | `append --todo` 指向了不存在的目标 | 先 `$LB todo add`，或用 `todo list` 核对 id |
+| 早间提醒只有标题没有进展 | 目标还没挂过工作记录 | 晚间记录时用 `append --todo <id>` 关联；旧记录不会被自动补关联 |

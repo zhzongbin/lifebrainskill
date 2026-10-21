@@ -85,6 +85,25 @@ Octop 的记忆抽取（atom 抽取 + entity page 重建）由 harness 的 memor
 早间任务用 `memory_search` 补充待办时，就是读这一晚整理出来的结果；
 权威清单仍然是 `todos.yaml`（确定性、可校验），记忆只作为补充（最多加 1 条）。
 
+## 4.5 目标进展怎么进早间提醒
+
+数据模型分两层，各管一件事：
+
+| 层 | 存哪 | 存什么 |
+|---|---|---|
+| 目标定义 | `<数据目录>/todos.yaml` | 叫什么、达成标准、挂在哪个项目、预计投入、截止日、状态 |
+| 实际投入 | `<数据目录>/journals/YYYY-Www.md` | 条目行尾的 `\| t1` 引用 + 该条时长 |
+
+于是三件事各归各位：
+
+- **清单**来自 `todos.yaml`（`todo list` / `todo review`）；
+- **进展和投入**来自周文件的引用（`actual_hours` / `last_progress` / `last_activity`）；
+- **完成度**是两者相除的结果（`planned_hours` vs `actual_hours`，`hours_gap`）。
+
+晚间会话里用户报"某目标推进了"→ `append --todo <id>`；
+用户说"明天要 X"→ `todo add`（这才是新目标）。
+早间用 `todo review --days 7` 一次拿到「该聚焦哪几个 + 投入 vs 预计 + 卡住没动的」。
+
 ## 5. 放进实例级全局技能包（技能共享池）
 
 Octop 的「全局技能包」是实例级的共享池：包里的技能可以挂给多个 agent，也可以让别的用户复制走。

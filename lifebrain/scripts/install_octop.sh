@@ -5,7 +5,7 @@
 #   ./install_octop.sh --with-cron     # 顺便注册每日提醒定时任务
 #   ./install_octop.sh --agent <ID>    # 指定目标 agent
 #   ./install_octop.sh --print-prompt  # 只打印晚间任务的 prompt 模板（路径自解析，可直接粘）
-#   ./install_octop.sh --print-prompt morning  # 只打印早间（带 todo）任务的 prompt 模板
+#   ./install_octop.sh --print-prompt morning  # 只打印早间（带目标进展）任务的 prompt 模板
 #
 # 环境变量：
 #   LIFEBRAIN_AGENT          agent id（默认从仓库路径推断，其次扫 ~/.octop/agents/）
@@ -63,6 +63,9 @@ PROMPT_TEMPLATE="$(cat <<'EOF'
 5. missing_dates 非空 → 末尾最多提一句漏记（只提最近一天）。
 6. 全程中文、口语化，总共不超过 3 句——这是推送到通道的消息，不是长报告。
 7. 结束前运行 python3 "$LB_SCRIPT" mark-reminder，防止兜底 crontab 重复打扰。
+8. 用户提到「明天/接下来要做什么」→ 用 todo add 记成新目标（早间提醒会带上）。
+9. 用户说的是「某个已有目标推进了/卡住了」→ 不要新建 todo，
+   用 append --todo <id> 把进展挂到那个目标上（时长会计入该目标）。
 EOF
 )"
 
@@ -75,14 +78,16 @@ MORNING_PROMPT_TEMPLATE="$(cat <<'EOF'
    [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d ~/.octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
    [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d ~/.octop/skill-packages/*/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
 2. 运行 python3 "$LB_SCRIPT" status --lookback 2，读 JSON。
-3. 运行 python3 "$LB_SCRIPT" todo list --status pending，读 JSON。
+3. 运行 python3 "$LB_SCRIPT" todo review --days 7，读 JSON（目标进展复盘：今天该聚焦哪几个、投入 vs 预计）。
 4. 可选：用 memory_search 查跟这些项目相关的未完成事项，最多补 1 条，不要硬凑。
 5. 输出不超过 5 行：
-   - 第 1 行：早安 + 「今天的 todo：1) … 2) …」（最多 3 条；没有待办写「今天还没排待办」）
-   - 第 2 行：昨天做了什么（1 行以内）
-   - 第 3 行：昨天有漏记就提一句
+   - 第 1 行：早安 + 「今天的目标：1) … 2) …」（最多 3 条；没有目标写「今天还没排目标」）
+   - 第 2 行：进展——每个目标最近一次进展 + 累计投入（如「t1 测线：上次到解释剖面，累计 3.5h/16h」）
+   - 第 3 行：昨天做了什么（1 行以内）
+   - 第 4 行：有漏记就提一句；然后最多问一个问题——挑一个目标问「今天想先推哪一步 / 有没有新进展或卡点」
+     （只问一个，不要变问卷）
 6. 全程中文、口语化，第一句就是人话，不要 JSON、不要脚本回显。
-7. 早间只读不写：不要 append、不要 todo add，等用户回复再动手。
+7. 早间只读不写：不要 append、不要 todo add、不要 todo done，等用户回复再动手。
 EOF
 )"
 
