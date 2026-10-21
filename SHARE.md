@@ -41,10 +41,16 @@ bash lifebrainskill/lifebrain/scripts/install_octop.sh --agent <AGENT_ID>
 
 - 想让提醒推到**微信/QQ**：在聊天窗口里跟自己的 agent 说「用 lifebrain 技能建一个每天 21:30 的提醒任务」——
   agent 用 `cronjob_create` 建的任务会**自动绑定当前通道**，结果推回那里。
+- 想要早上的待办提醒，再建一条（早 7:30，推今天的 todo）：
+  「用 lifebrain 技能建一个每天早上 7:30 的待办提醒任务」。
 - 用 CLI 建的任务会绑到 dashboard（网页控制台），且需要 `octop service restart` 才被调度器加载：
   ```bash
   octop --agent <AGENT_ID> cron create --trigger "cron:30 21 * * *" \
     --prompt "$(bash lifebrain/scripts/install_octop.sh --print-prompt)" \
+    --task-type agent --fresh-thread
+
+  octop --agent <AGENT_ID> cron create --trigger "cron:30 7 * * *" \
+    --prompt "$(bash lifebrain/scripts/install_octop.sh --print-prompt morning)" \
     --task-type agent --fresh-thread
   ```
 

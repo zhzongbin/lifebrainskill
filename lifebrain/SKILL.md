@@ -63,6 +63,9 @@ LB="python3 $LB_SCRIPT"
 | `$LB project list \| add <名> \| set <名>` | 项目登记 / 修改 |
 | `$LB report --week W \| --month M` | 按项目聚合（时長、条目、空缺日期） |
 | `$LB rebuild` | 手动重算项目索引 |
+| `$LB todo add --content "要做的事" [--project P] [--due 2026-10-22]` | 加一条待办（早间提醒会带上它） |
+| `$LB todo list [--status pending\|done\|all]` | 看待办清单 |
+| `$LB todo done <id>` / `$LB todo rm <id>` | 完成 / 删除待办 |
 | `$LB mark-reminder` | 写「今天已提醒」marker（防重复打扰） |
 
 ## 首次使用：先和用户确认数据目录（硬性流程）
@@ -150,7 +153,7 @@ $LB project add web --category work --goal "一句话目标"
 $LB project add 健身 --category life --goal "保持体能"
 ```
 
-### 2. 提醒模式（cron 主动发起会话）
+### 2. 晚间提醒模式（cron 主动发起会话）
 
 当消息以 `[lifebrain-reminder]` 开头时，说明这是一次**定时任务无头拉起**的会话（Octop cron → 主动发起 → 推送到用户通道）：
 
@@ -159,10 +162,27 @@ $LB project add 健身 --category life --goal "保持体能"
 3. 今天**没记录** → 简短问 1-2 个问题（通道消息要短，别一口气甩 5 个问题）："今天主要做了什么？"（附上已知的项目名提示）。
 4. 用户回复后正常走模式 1 落盘，写完 `$LB mark-reminder`。
 5. 有漏记日期 → 在最后一句里带一句"另外 10-19、10-20 还没记"，别单独再开一轮。
+6. 用户提到"明天/接下来要 X" → `$LB todo add --content "X" [--project P]` 记成待办，早间提醒会带上它。
 
 > 这个会话的输出会被推送到微信/QQ等通道，**第一句就要给到人话**，不要输出思考过程、JSON 或脚本回显。
 
-### 3. 周报 / 月报 / 项目汇总
+### 3. 早间模式（带今日 todo）
+
+当消息以 `[lifebrain-morning]` 开头时，是**早上的定时会话**：把今天的待办清单推给用户。
+
+1. `$LB status --lookback 2`（昨天记了什么、有没有漏记）和 `$LB todo list --status pending`（待办）。
+2. 可选：`memory_search` 查一下跟这些项目相关的未完成事项，**最多补 1 条**，不要硬凑。
+3. 输出控制在 5 行以内：
+   - 第 1 行：早安 + 「今天的 todo：1) … 2) …」（最多 3 条；没待办就写"今天还没排待办"）。
+   - 第 2 行：昨天做了什么（1 行内）。
+   - 第 3 行：昨天有漏记就提一句。
+4. **早间只读不写**：不要 append、不要 todo add，等用户回复再动手。
+5. 用户回"1"或"先做 X" → 记成今天的条目（类型写"计划"），并把对应待办 `todo done <id>`。
+
+> 晚间会话结束后，Octop 会在会话静默约 5 分钟后自动做记忆抽取（整理）；
+> 所以第二天早上 `memory_search` 拿到的就是昨晚整理过的内容。详见 `references/octop-setup.md`。
+
+### 4. 周报 / 月报 / 项目汇总
 
 用户说"周报 / 月报 / 项目汇总"时：
 
@@ -196,6 +216,28 @@ $LB project add 健身 --category life --goal "保持体能"
 5. missing_dates 非空 → 末尾最多提一句漏记（只提最近一天）。
 6. 全程中文、口语化，总共不超过 3 句——这是推送到通道的消息，不是长报告。
 7. 结束前运行 python3 "$LB_SCRIPT" mark-reminder，防止兜底 crontab 重复打扰。
+8. 用户提到「明天/接下来要做什么」→ 用 todo add 记成待办（早间提醒会带上）。
+```
+
+**早间任务的 prompt 模板**（配合 `cron:30 7 * * *` 这类早上触发）：
+
+```
+[lifebrain-morning] 执行 lifebrain skill 的早间模式（无头定时会话，回复会推送到用户所在通道）。
+
+1. 先解析脚本路径（四个候选，取第一个存在的）：
+   LB_SCRIPT="$(ls -d ~/.octop/agents/*/.octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
+   [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d .octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
+   [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d ~/.octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
+   [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d ~/.octop/skill-packages/*/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
+2. 运行 python3 "$LB_SCRIPT" status --lookback 2，读 JSON。
+3. 运行 python3 "$LB_SCRIPT" todo list --status pending，读 JSON。
+4. 可选：用 memory_search 查跟这些项目相关的未完成事项，最多补 1 条，不要硬凑。
+5. 输出不超过 5 行：
+   - 第 1 行：早安 + 「今天的 todo：1) … 2) …」（最多 3 条；没有待办写「今天还没排待办」）
+   - 第 2 行：昨天做了什么（1 行以内）
+   - 第 3 行：昨天有漏记就提一句
+6. 全程中文、口语化，第一句就是人话，不要 JSON、不要脚本回显。
+7. 早间只读不写：不要 append、不要 todo add，等用户回复再动手。
 ```
 
 **建任务**（`--agent` 换成自己的 agent id）：
@@ -204,6 +246,11 @@ $LB project add 健身 --category life --goal "保持体能"
 octop --agent <AGENT_ID> cron list
 octop --agent <AGENT_ID> cron create --trigger "cron:30 21 * * *" \
   --prompt "<上面的模板>" \
+  --task-type agent --fresh-thread
+
+# 早间带 todo 的那条
+octop --agent <AGENT_ID> cron create --trigger "cron:30 7 * * *" \
+  --prompt "<早间模板>" \
   --task-type agent --fresh-thread
 ```
 

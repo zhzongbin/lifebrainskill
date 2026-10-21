@@ -45,14 +45,29 @@ agent **不会**默默把数据写进默认位置。第一次用的时候它会�
 # 2. 注册每日提醒定时任务（让 agent 用 cronjob_create 工具创建最好，会绑定当前通道会话并立即生效）
 octop --agent JVZG0K cron create \
   --trigger "cron:30 21 * * *" \
-  --prompt "[lifebrain-reminder] 请执行 lifebrain skill 的提醒模式：检查今天是否已记录，未记录则进入每日记录问答。" \
+  --prompt "$(bash lifebrain/scripts/install_octop.sh --print-prompt)" \
   --task-type agent --fresh-thread
 
-# 3.（可选）system crontab 兜底，21:50 补一次，脚本自带去重
+# 3. 早间带 todo 的那条
+octop --agent JVZG0K cron create \
+  --trigger "cron:30 7 * * *" \
+  --prompt "$(bash lifebrain/scripts/install_octop.sh --print-prompt morning)" \
+  --task-type agent --fresh-thread
+
+# 4.（可选）system crontab 兜底，21:50 补一次，脚本自带去重
 50 21 * * * ~/.octop/agents/JVZG0K/.octop/skills/lifebrain/scripts/reminder.sh >> ~/.lifebrain-reminder.log 2>&1
 ```
 
 细节见 `lifebrain/references/octop-setup.md`。
+
+## 早上的 todo 从哪来
+
+- **待办清单**存在数据目录的 `todos.yaml`，由 `lifebrain.py todo add/done/list` 维护。
+  晚间提醒里用户说"明天要 X"，agent 会自动 `todo add`；早间那条把 pending 的待办列出来。
+- **Octop 记忆**（atom 抽取 / entity page）由 harness 的 memory middleware 触发，
+  默认是**会话静默 300 秒后**整理，不是固定夜间定时 —— 晚上聊完 5 分钟就整理好了，
+  早间任务可以用 `memory_search` 补充最多 1 条。
+- 权威清单是 `todos.yaml`，记忆只做补充（别硬凑）。
 
 ## CLI
 
@@ -68,6 +83,9 @@ $LB show --date 2026-10-21                # 读某天
 $LB append --date 2026-10-21 --time 14:30 --project web --type 开发 --duration 2h --content "完成登录 API 联调"
 $LB append --entry "09:00|web|会议|1h|需求评审" --entry "20:00|健身|生活|1h|跑步 5km"
 $LB project add 健身 --category life --goal "保持体能"
+$LB todo add --content "把测线数据反演完" --project web   # 加待办（早间提醒会带上）
+$LB todo list --status pending                             # 看待办
+$LB todo done t1                                           # 勾掉
 $LB report --week 2026-W43                # 按项目聚合
 $LB rebuild                               # 重算项目索引
 $LB mark-reminder                         # 写"今天已提醒"marker

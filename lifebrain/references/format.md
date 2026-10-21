@@ -9,11 +9,30 @@
   config.yaml               # data_dir / reminder_time / timezone
 <数据目录>/                  # 默认 ~/lifebrain，可被 config.yaml:data_dir 指到别处
   projects.yaml             # 项目注册表
+  todos.yaml                # 待办清单（早间提醒带的就是它）
   journals/2026-W43.md      # 周文件（唯一真相源，ISO 周命名）
   projects/<name>.md        # 项目索引（脚本重算，只读）
   reports/                  # 周报月报存档
   .reminder-YYYY-MM-DD      # 当天提醒已发 marker（防止重复打扰）
 ```
+
+## todos.yaml（待办）
+
+早间提醒推送的清单就是它；晚间会话里用户说"明天要 X"时用 `todo add` 记进来。
+
+```yaml
+todos:
+  t1:
+    content: "把高密度电法测线数据反演完"   # 必填
+    project: 永定大排铅锌矿物探               # 可选，关联项目
+    due: "2026-10-22"                        # 可选
+    created: "2026-10-21"
+    status: pending                          # pending | done
+    done_at: "2026-10-22"                    # 完成后写入
+```
+
+- id 自增（`t1`、`t2`…），`done` 只是改 `status` 并写 `done_at`，记录留在文件里。
+- 格式是普通 YAML 双层映射，没有 PyYAML 也能读（脚本自带降级解析）。
 
 ## config.yaml
 

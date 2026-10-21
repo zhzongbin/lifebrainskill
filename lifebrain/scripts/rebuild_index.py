@@ -12,6 +12,7 @@ Exit codes: 0 = ok, 1 = no journals, 2 = dropped unparseable entry lines.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -89,7 +90,14 @@ def mini_yaml_load(text: str) -> dict:
             continue
         key, _, value = line.partition(":")
         key = key.strip()
-        value = value.strip().strip('"').strip("'")
+        value = value.strip()
+        if value.startswith('"') and value.endswith('"') and len(value) >= 2:
+            try:
+                value = json.loads(value)
+            except ValueError:
+                value = value.strip('"').strip("'")
+        else:
+            value = value.strip('"').strip("'")
         if value == "":
             node: dict = {}
             parent[key] = node

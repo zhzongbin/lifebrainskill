@@ -255,6 +255,128 @@ def save_registry(root: Path, projects: dict) -> None:
         p.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+# ------------------------------------------------------------------ todos
+
+def todos_path(root: Path) -> Path:
+    return root / "todos.yaml"
+
+
+def load_todos(root: Path) -> dict:
+    p = todos_path(root)
+    if not p.exists():
+        return {}
+    data = read_yaml(p) or {}
+    todos = data.get("todos") or {}
+    return todos if isinstance(todos, dict) else {}
+
+
+def save_todos(root: Path, todos: dict) -> None:
+    """Write todos.yaml.
+
+    Layout is a mapping keyed by id (not a YAML list) so both PyYAML and the
+    dependency-free mini parser can read it back.
+    """
+    p = todos_path(root)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["todos:"]
+    for tid, todo in todos.items():
+        lines.append(f"  {tid}:")
+        for k in ("content", "project", "due", "created", "status", "done_at"):
+            v = (todo or {}).get(k)
+            if v in (None, ""):
+                continue
+            lines.append(f"    {k}: {json.dumps(str(v), ensure_ascii=False)}")
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _next_todo_id(todos: dict) -> str:
+    n = 0
+    for tid in todos:
+        m = re.fullmatch(r"t(\d+)", str(tid))
+        if m:
+            n = max(n, int(m.group(1)))
+    return f"t{n + 1}"
+
+
+def _todo_public(tid: str, todo: dict) -> dict:
+    t = dict(todo or {})
+    t["id"] = tid
+    t.setdefault("status", "pending")
+    t.setdefault("created", now_local().date().isoformat())
+    return t
+
+
+def cmd_todo(args) -> int:
+    """Manage the todo list that drives the morning reminder."""
+    root = Path(args.data_dir).expanduser() if args.data_dir else default_data_dir()
+    todos = load_todos(root)
+    action = args.action
+    todo_id = args.id or getattr(args, "id_pos", None)
+
+    if action == "add":
+        content = (args.content or "").strip()
+        if not content:
+            die("todo add 需要 --content \"要做的事\"", 2)
+        tid = todo_id or _next_todo_id(todos)
+        if tid in todos:
+            die(f"todo id {tid} 已存在", 2)
+        todo = {
+            "content": content,
+            "status": "pending",
+            "created": now_local().date().isoformat(),
+        }
+        if args.project:
+            todo["project"] = args.project
+        if args.due:
+            todo["due"] = parse_date(args.due).isoformat()
+        todos[tid] = todo
+        save_todos(root, todos)
+        out({"ok": True, "action": "add", "id": tid, "todo": _todo_public(tid, todo)})
+        return 0
+
+    if action == "list":
+        want = args.status or "pending"
+        items = []
+        for tid, todo in todos.items():
+            t = _todo_public(tid, todo)
+            if want != "all" and t.get("status") != want:
+                continue
+            if args.project and t.get("project") != args.project:
+                continue
+            items.append(t)
+        items.sort(key=lambda t: (t.get("status") != "pending", t.get("due") or "9999", t.get("created") or ""))
+        out({
+            "todos": items,
+            "count": len(items),
+            "pending_count": sum(1 for t in todos.values() if (t or {}).get("status", "pending") == "pending"),
+            "done_count": sum(1 for t in todos.values() if (t or {}).get("status") == "done"),
+            "file": str(todos_path(root)),
+        })
+        return 0
+
+    if action == "done":
+        tid = todo_id
+        if tid not in todos:
+            die(f"没有这个 todo：{tid}", 2)
+        todos[tid]["status"] = "done"
+        todos[tid]["done_at"] = now_local().date().isoformat()
+        save_todos(root, todos)
+        out({"ok": True, "action": "done", "id": tid, "todo": _todo_public(tid, todos[tid])})
+        return 0
+
+    if action == "rm":
+        tid = todo_id
+        if tid not in todos:
+            die(f"没有这个 todo：{tid}", 2)
+        removed = todos.pop(tid)
+        save_todos(root, todos)
+        out({"ok": True, "action": "rm", "id": tid, "removed": _todo_public(tid, removed)})
+        return 0
+
+    die(f"未知 todo 动作：{action}", 2)
+    return 2
+
+
 # ---------------------------------------------------------------- commands
 
 def _initialized(root: Path) -> bool:
@@ -336,6 +458,11 @@ def cmd_init(args) -> int:
         reg.write_text("projects: {}\n", encoding="utf-8")
         created.append(str(reg))
 
+    tp = todos_path(target)
+    if not tp.exists():
+        tp.write_text("todos:\n", encoding="utf-8")
+        created.append(str(tp))
+
     # 建本周周文件，把今天标成「无记录」，提醒流程才有锚点
     today = now_local().date()
     jp = journal_path(target, today)
@@ -380,6 +507,12 @@ def cmd_status(args) -> int:
 
     today = now_local().date()
     marker = root / f".reminder-{target.isoformat()}"
+    todos = load_todos(root)
+    pending = [
+        _todo_public(tid, t) for tid, t in todos.items()
+        if (t or {}).get("status", "pending") == "pending"
+    ]
+    pending.sort(key=lambda t: (t.get("due") or "9999", t.get("created") or ""))
     out({
         "data_dir": str(root),
         "data_dir_source": _source_for(args),
@@ -394,6 +527,7 @@ def cmd_status(args) -> int:
         "missing_dates": missing,
         "lookback": lookback,
         "projects": registry,
+        "pending_todos": pending,
         "reminder_marker": str(marker) if marker.exists() else None,
         "reminder_fired_today": marker.exists(),
     })
@@ -679,6 +813,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_report)
 
     sub.add_parser("rebuild", help="重建项目索引").set_defaults(func=cmd_rebuild)
+
+    p = sub.add_parser("todo", help="待办清单（早间提醒用）")
+    p.add_argument("action", choices=["add", "list", "done", "rm"])
+    p.add_argument("id_pos", nargs="?", default=None, help="待办 id（done/rm 时必填）")
+    p.add_argument("--content", default=None, help="待办内容（add 时必填）")
+    p.add_argument("--id", dest="id", default=None, help="待办 id（done/rm 时必填）")
+    p.add_argument("--project", default=None, help="关联项目")
+    p.add_argument("--due", default=None, help="期望完成日期 YYYY-MM-DD")
+    p.add_argument("--status", default=None, choices=["pending", "done", "all"],
+                   help="list 时筛选，默认 pending")
+    p.set_defaults(func=cmd_todo)
 
     p = sub.add_parser("mark-reminder", help="写下今日提醒已触发的标记（防重复）")
     p.add_argument("--date", default=None)

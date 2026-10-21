@@ -4,12 +4,14 @@
 #   ./install_octop.sh                  # 只部署技能文件
 #   ./install_octop.sh --with-cron     # 顺便注册每日提醒定时任务
 #   ./install_octop.sh --agent <ID>    # 指定目标 agent
-#   ./install_octop.sh --print-prompt  # 只打印定时任务的 prompt 模板（路径自解析，可直接粘）
+#   ./install_octop.sh --print-prompt  # 只打印晚间任务的 prompt 模板（路径自解析，可直接粘）
+#   ./install_octop.sh --print-prompt morning  # 只打印早间（带 todo）任务的 prompt 模板
 #
 # 环境变量：
 #   LIFEBRAIN_AGENT          agent id（默认从仓库路径推断，其次扫 ~/.octop/agents/）
 #   LIFEBRAIN_SKILLS_DIR     目标技能目录（默认 ~/.octop/agents/<agent>/.octop/skills）
 #   LIFEBRAIN_TRIGGER        cron 触发串（默认 cron:30 21 * * *，按实例时区解释）
+#   LIFEBRAIN_MORNING_TRIGGER 早间任务触发串（默认 cron:30 7 * * *）
 set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -29,10 +31,14 @@ infer_agent() {
 AGENT=""
 WITH_CRON=0
 PRINT_PROMPT=0
+PROMPT_KIND="evening"
 while [ $# -gt 0 ]; do
   case "$1" in
     --with-cron) WITH_CRON=1 ;;
-    --print-prompt) PRINT_PROMPT=1 ;;
+    --print-prompt)
+      PRINT_PROMPT=1
+      if [ "${2:-}" = "morning" ]; then PROMPT_KIND="morning"; shift; fi
+      ;;
     --agent) AGENT="${2:-}"; shift ;;
     -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
     *) echo "未知参数：$1" >&2; exit 2 ;;
@@ -60,8 +66,32 @@ PROMPT_TEMPLATE="$(cat <<'EOF'
 EOF
 )"
 
+MORNING_PROMPT_TEMPLATE="$(cat <<'EOF'
+[lifebrain-morning] 执行 lifebrain skill 的早间模式（无头定时会话，回复会推送到用户所在通道）。
+
+1. 先解析脚本路径（四个候选，取第一个存在的）：
+   LB_SCRIPT="$(ls -d ~/.octop/agents/*/.octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
+   [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d .octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
+   [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d ~/.octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
+   [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d ~/.octop/skill-packages/*/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
+2. 运行 python3 "$LB_SCRIPT" status --lookback 2，读 JSON。
+3. 运行 python3 "$LB_SCRIPT" todo list --status pending，读 JSON。
+4. 可选：用 memory_search 查跟这些项目相关的未完成事项，最多补 1 条，不要硬凑。
+5. 输出不超过 5 行：
+   - 第 1 行：早安 + 「今天的 todo：1) … 2) …」（最多 3 条；没有待办写「今天还没排待办」）
+   - 第 2 行：昨天做了什么（1 行以内）
+   - 第 3 行：昨天有漏记就提一句
+6. 全程中文、口语化，第一句就是人话，不要 JSON、不要脚本回显。
+7. 早间只读不写：不要 append、不要 todo add，等用户回复再动手。
+EOF
+)"
+
 if [ "$PRINT_PROMPT" = "1" ]; then
-  printf '%s\n' "$PROMPT_TEMPLATE"
+  if [ "$PROMPT_KIND" = "morning" ]; then
+    printf '%s\n' "$MORNING_PROMPT_TEMPLATE"
+  else
+    printf '%s\n' "$PROMPT_TEMPLATE"
+  fi
   exit 0
 fi
 
@@ -113,6 +143,15 @@ for r in rows:
     --task-type agent \
     --fresh-thread
   echo "✔ 定时任务已注册（$TRIGGER）"
+
+  # 早间带 todo 的那条
+  MORNING_TRIGGER="${LIFEBRAIN_MORNING_TRIGGER:-cron:30 7 * * *}"
+  octop --agent "$AGENT" cron create \
+    --trigger "$MORNING_TRIGGER" \
+    --prompt "$MORNING_PROMPT_TEMPLATE" \
+    --task-type agent \
+    --fresh-thread
+  echo "✔ 早间待办提醒已注册（$MORNING_TRIGGER）"
   echo "  注意 1：CLI 写的是本地 DB，需要 'octop service restart' 才会被运行中的服务加载。"
   echo "  注意 2：CLI 建的任务绑到 dashboard（网页控制台）。"
   echo "        想让提醒直接进微信/QQ，请在聊天里让 agent 用 cronjob_create 工具建，会自动绑当前通道。"
