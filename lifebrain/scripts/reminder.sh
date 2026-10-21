@@ -16,7 +16,16 @@ set -euo pipefail
 
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LI=(python3 "${SKILL_DIR}/scripts/lifebrain.py")
-AGENT="${LIFEBRAIN_AGENT:-JVZG0K}"
+infer_agent() {
+  # 从 <...>/.octop/agents/<agent-id>/... 抠 agent id；否则扫本机已装的 agent
+  if [[ "$SKILL_DIR" =~ \.octop/agents/([^/]+) ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+    return
+  fi
+  ls -1 "$HOME/.octop/agents" 2>/dev/null | head -1 || true
+}
+AGENT="${LIFEBRAIN_AGENT:-$(infer_agent)}"
+AGENT="${AGENT:-JVZG0K}"
 CRON_ID="${LIFEBRAIN_CRON_ID:-}"
 LOG="${LIFEBRAIN_LOG:-$HOME/.lifebrain-reminder.log}"
 REMINDER_PROMPT='[lifebrain-reminder] 请执行 lifebrain skill 的提醒模式：检查今天是否已记录，未记录则进入每日记录问答。'

@@ -24,18 +24,24 @@ metadata:
 
 | 东西 | 位置 |
 |------|------|
-| 脚本入口 | `/home/zhzongbin/.octop/agents/JVZG0K/.octop/skills/lifebrain/scripts/lifebrain.py` |
+| 脚本入口 | **本 skill 目录**下的 `scripts/lifebrain.py`（安装路径因实例而异，见下方解析） |
 | 数据目录 | `~/lifebrain`（可用环境变量 `LB_DATA_DIR` 或 `config.yaml:data_dir` 覆盖） |
 | 周文件 | `~/lifebrain/journals/YYYY-Www.md` — **唯一真相源** |
 | 项目注册表 | `~/lifebrain/projects.yaml` |
 | 项目索引 | `~/lifebrain/projects/<name>.md` — **脚本生成，禁止手改** |
 | 报告存档 | `~/lifebrain/reports/YYYY-Www.md` / `YYYY-MM.md` |
 
-下面统一用这个别名（换成实际安装路径）：
+### 先解析脚本路径（安装位置因实例而异，别写死）
 
 ```bash
-LB="python3 /home/zhzongbin/.octop/agents/JVZG0K/.octop/skills/lifebrain/scripts/lifebrain.py"
+LB_SCRIPT="$(ls -d ~/.octop/agents/*/.octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
+[ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d .octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
+[ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d ~/.octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
+LB="python3 $LB_SCRIPT"
 ```
+
+三条都没命中就 `find ~ -path '*skills/lifebrain/scripts/lifebrain.py' 2>/dev/null | head -1`。
+解析一次后本轮对话复用 `$LB`；`$LB config` 会打印当前真实路径，可用它自检。
 
 所有子命令都往 stdout 输出 JSON，错误走 stderr 并返回非 0 —— **你只管解析 JSON，不用肉眼读 Markdown**。
 
@@ -109,18 +115,40 @@ $LB project add 健身 --category life --goal "保持体能"
 
 ## 定时任务（Octop 侧）
 
-每日提醒由 Octop 自己的调度器负责，**不需要**再拉 headless CLI：
+每日提醒由 Octop 自己的调度器负责，**不需要**再拉 headless CLI。
+
+**建提醒任务的 prompt 模板**（复制去用，路径是自解析的，换机器不用改）：
+
+```
+[lifebrain-reminder] 执行 lifebrain skill 的提醒模式（无头定时会话，回复会推送到用户所在通道）。
+
+1. 先解析脚本路径：
+   LB_SCRIPT="$(ls -d ~/.octop/agents/*/.octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
+   [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d .octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
+   两条都没命中就 find ~ -path '*skills/lifebrain/scripts/lifebrain.py' | head -1
+2. 运行 python3 "$LB_SCRIPT" status --lookback 3，读 JSON。
+3. recorded=true → 只回一句「今天已经记过了 ✓」+ 今天的条目，不再问问题。
+4. recorded=false → 1-2 句话问「今天主要做了什么？大概多久？」，用户回复后用 append 写入
+   （项目要先在 projects.yaml 登记；脚本会自动重建索引）。
+5. missing_dates 非空 → 末尾最多提一句漏记（只提最近一天）。
+6. 全程中文、口语化，总共不超过 3 句——这是推送到通道的消息，不是长报告。
+7. 结束前运行 python3 "$LB_SCRIPT" mark-reminder，防止兜底 crontab 重复打扰。
+```
+
+**建任务**（`--agent` 换成自己的 agent id）：
 
 ```bash
-octop --agent JVZG0K cron list
-octop --agent JVZG0K cron create --trigger "cron:30 21 * * *" \
-  --prompt "[lifebrain-reminder] 请执行 lifebrain skill 的提醒模式：检查今天是否已记录，未记录则进入每日记录问答。" \
+octop --agent <AGENT_ID> cron list
+octop --agent <AGENT_ID> cron create --trigger "cron:30 21 * * *" \
+  --prompt "<上面的模板>" \
   --task-type agent --fresh-thread
 ```
 
 - `--task-type agent` 才会真正跑一次 agent 会话（`text` 只是把 prompt 原样推出去）。
-- cron 任务绑定到创建它的那个通道会话，结果会推回该通道（微信 / QQ / dashboard）。
-- 想知道更多（通道投递、兜底触发、时区）：见 `references/octop-setup.md`。
+- **通道绑定**：在聊天窗口里让 agent 用 `cronjob_create` 建任务，会自动绑到当前通道（微信/QQ），结果推回那里；
+  用上面的 CLI 建则会绑到 dashboard（网页控制台）。CLI 建完需要 `octop service restart` 才被调度器加载。
+- 时区跟随实例配置 `default_timezone`（默认 Asia/Shanghai），不是机器系统时区。
+- 想知道更多（通道投递、兜底触发、实例内共享包）：见 `references/octop-setup.md`。
 
 ## 硬性规则
 
