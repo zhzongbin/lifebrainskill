@@ -2,8 +2,17 @@
 """Rebuild project index files from weekly journals.
 
 Journals are the single source of truth; projects/*.md are derived.
-Line format: - HH:MM | project | type | duration | content
+Entry format: - HH:MM | project | type | duration | content
+
+Usage:
+    python3 rebuild_index.py [--data-dir ~/lifebrain] [--quiet]
+
+Exit codes: 0 = ok, 1 = no journals, 2 = dropped unparseable entry lines.
 """
+from __future__ import annotations
+
+import argparse
+import os
 import re
 import sys
 from collections import defaultdict
@@ -14,16 +23,58 @@ try:
 except ImportError:
     yaml = None
 
-def data_dir() -> Path:
-    cfg = Path.home() / "lifebrain" / "config.yaml"
-    if cfg.exists() and yaml:
-        d = yaml.safe_load(cfg.read_text()).get("data_dir")
-        if d:
-            return Path(d).expanduser()
-    return Path.home() / "lifebrain"
-
 ENTRY = re.compile(r"^- (\d{2}:\d{2}|--:--) \| ([^|]+) \| ([^|]+) \| ([\d.]+[hm]) \| (.+)$")
 HOURS = re.compile(r"([\d.]+)h")
+DATE_HEAD = re.compile(r"^## (\d{4}-\d{2}-\d{2})\s*$")
+
+
+def default_data_dir() -> Path:
+    """Resolve the data dir: $LB_DATA_DIR > config.yaml:data_dir > ~/lifebrain."""
+    env = os.environ.get("LB_DATA_DIR")
+    if env:
+        return Path(env).expanduser()
+    home = Path.home() / "lifebrain"
+    cfg = home / "config.yaml"
+    if cfg.exists():
+        data = read_yaml(cfg).get("data_dir")
+        if data:
+            return Path(str(data)).expanduser()
+    return home
+
+
+def read_yaml(path: Path) -> dict:
+    """Read a small YAML file; falls back to a mini parser when PyYAML is absent."""
+    text = path.read_text(encoding="utf-8")
+    if yaml is not None:
+        return yaml.safe_load(text) or {}
+    return mini_yaml_load(text)
+
+
+def mini_yaml_load(text: str) -> dict:
+    """Minimal nested-mapping YAML parser (2-space indent, scalars only)."""
+    root: dict = {}
+    stack: list[tuple[int, dict]] = [(-1, root)]
+    for raw in text.splitlines():
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip())
+        line = raw.strip()
+        while stack and indent <= stack[-1][0]:
+            stack.pop()
+        parent = stack[-1][1] if stack else root
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if value == "":
+            node: dict = {}
+            parent[key] = node
+            stack.append((indent, node))
+        else:
+            parent[key] = value
+    return root
+
 
 def to_hours(dur: str) -> float:
     m = HOURS.match(dur)
@@ -31,43 +82,55 @@ def to_hours(dur: str) -> float:
         return float(m.group(1))
     return float(dur.rstrip("m")) / 60.0
 
-def main() -> int:
-    root = data_dir()
+
+def parse_journal(text: str) -> tuple[dict[str, list[tuple[str, str, str, str, str]]], list[tuple[int, str]]]:
+    """Return (date -> entries, dropped_lines) for one weekly journal."""
+    by_date: dict[str, list[tuple[str, str, str, str, str]]] = defaultdict(list)
+    dropped: list[tuple[int, str]] = []
+    date = None
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        m = DATE_HEAD.match(line)
+        if m:
+            date = m.group(1)
+            continue
+        m = ENTRY.match(line)
+        if m and date:
+            by_date[date].append((m.group(1), m.group(2).strip(), m.group(3).strip(), m.group(4), m.group(5)))
+        elif line.startswith("- ") and "无记录" not in line:
+            dropped.append((lineno, line))
+    return dict(by_date), dropped
+
+
+def rebuild(root: Path, *, registry: dict | None = None) -> dict:
+    """Regenerate projects/<name>.md from the journals. Returns a summary dict."""
     journals = sorted((root / "journals").glob("*.md"))
     if not journals:
-        print("no journals found", file=sys.stderr)
-        return 1
+        return {"ok": False, "reason": "no journals found", "generated": [], "dropped": []}
 
-    registry = {}
-    reg_file = root / "projects.yaml"
-    if reg_file.exists() and yaml:
-        registry = (yaml.safe_load(reg_file.read_text()) or {}).get("projects", {})
+    if registry is None:
+        registry = {}
+        reg_file = root / "projects.yaml"
+        if reg_file.exists():
+            registry = (read_yaml(reg_file) or {}).get("projects", {}) or {}
 
     # project -> week -> list of (date, time, type, duration, content)
     timeline: dict[str, dict[str, list]] = defaultdict(lambda: defaultdict(list))
-    dropped = 0
+    dropped: list[dict] = []
     for jf in journals:
         week = jf.stem  # e.g. 2026-W43
-        date = None
-        for line in jf.read_text().splitlines():
-            m = re.match(r"^## (\d{4}-\d{2}-\d{2})$", line)
-            if m:
-                date = m.group(1)
-                continue
-            m = ENTRY.match(line)
-            if m and date:
-                timeline[m.group(2).strip()][week].append((date, *m.groups()[0:1], m.group(3), m.group(4), m.group(5)))
-            elif line.startswith("- ") and not line.startswith("- [") and "无记录" not in line:
-                dropped += 1
-
-    if dropped:
-        print(f"WARNING: {dropped} unparseable entry line(s) dropped", file=sys.stderr)
+        by_date, bad = parse_journal(jf.read_text(encoding="utf-8"))
+        for lineno, line in bad:
+            dropped.append({"file": jf.name, "line": lineno, "text": line})
+        for date, entries in by_date.items():
+            for entry in entries:
+                timeline[entry[1]][week].append((date, *entry))
 
     out_dir = root / "projects"
-    out_dir.mkdir(exist_ok=True)
-    generated = set()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    generated: list[str] = []
+    totals: dict[str, float] = {}
     for proj, weeks in sorted(timeline.items()):
-        meta = registry.get(proj, {})
+        meta = registry.get(proj, {}) or {}
         lines = [f"# {proj}", "",
                  f"- 类别: {meta.get('category', '?')}  状态: {meta.get('status', '?')}",
                  f"- 目标: {meta.get('goal', '—')}", ""]
@@ -75,23 +138,51 @@ def main() -> int:
         for week in sorted(weeks):
             lines.append(f"## {week}")
             whours = 0.0
-            for date, t, typ, dur, content in weeks[week]:
+            for date, t, _proj, typ, dur, content in weeks[week]:
                 lines.append(f"- {date} {t} | {typ} | {dur} | {content}")
                 whours += to_hours(dur)
             lines += ["", f"小计: {whours:.1f}h", ""]
             total += whours
         lines.append(f"总计: {total:.1f}h")
-        (out_dir / f"{proj}.md").write_text("\n".join(lines) + "\n")
-        generated.add(proj)
+        (out_dir / f"{proj}.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        generated.append(proj)
+        totals[proj] = round(total, 2)
 
-    # Remove stale index files for unregistered/renamed projects
+    removed: list[str] = []
     for f in out_dir.glob("*.md"):
         if f.stem not in generated:
             f.unlink()
-            print(f"removed stale index {f.name}", file=sys.stderr)
+            removed.append(f.name)
 
-    print(f"rebuilt {len(generated)} project index file(s)")
-    return 0 if not dropped else 2
+    return {
+        "ok": True,
+        "generated": generated,
+        "totals": totals,
+        "dropped": dropped,
+        "removed": removed,
+        "journals": [j.name for j in journals],
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="Rebuild lifebrain project indexes from weekly journals.")
+    ap.add_argument("--data-dir", default=None, help="Override the data dir (default: $LB_DATA_DIR / config.yaml / ~/lifebrain).")
+    ap.add_argument("--quiet", action="store_true", help="Only print errors.")
+    args = ap.parse_args(argv)
+
+    root = Path(args.data_dir).expanduser() if args.data_dir else default_data_dir()
+    result = rebuild(root)
+    if not result["ok"]:
+        print(result["reason"], file=sys.stderr)
+        return 1
+    for item in result["dropped"]:
+        print(f"WARNING: {item['file']}:{item['line']} unparseable entry line dropped: {item['text']}", file=sys.stderr)
+    for name in result["removed"]:
+        print(f"removed stale index {name}", file=sys.stderr)
+    if not args.quiet:
+        print(f"rebuilt {len(result['generated'])} project index file(s)")
+    return 2 if result["dropped"] else 0
+
 
 if __name__ == "__main__":
     sys.exit(main())
