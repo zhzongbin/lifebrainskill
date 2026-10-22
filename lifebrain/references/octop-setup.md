@@ -33,7 +33,7 @@ octop --agent JVZG0K cron create \
 **B. system crontab 兜底（本仓库 `scripts/reminder.sh`）**
 
 ```cron
-50 21 * * * LIFEBRAIN_SCOPE=JVZG0K /home/zhzongbin/.octop/agents/JVZG0K/.octop/skills/lifebrain/scripts/reminder.sh >> ~/.lifebrain-reminder-JVZG0K.log 2>&1
+50 21 * * * LIFEBRAIN_SCOPE=JVZG0K LIFEBRAIN_CRON_ID=<晚间那条 cron id> /home/zhzongbin/.octop/agents/JVZG0K/.octop/skills/lifebrain/scripts/reminder.sh >> ~/.lifebrain-reminder-JVZG0K.log 2>&1
 ```
 
 > **每个 scope 一行**，并且把 `LIFEBRAIN_SCOPE` 钉死。共享主机上多个用户的兜底脚本
@@ -46,9 +46,20 @@ octop --agent JVZG0K cron create \
 2. 今天已有 `.reminder-YYYY-MM-DD` marker → 查该 cron 的 `last_status`：
    - `ok` → 投递成功过，退出
    - `error` → **投递失败过** → 清掉 marker，继续往下重试（这是"发失败了还能补发"的关键）
-3. 否则 `octop cron run-now <job_id>` 触发同一条投递链路
+3. 否则触发同一条投递链路（**v1.3.3 起走 live API**，见下）：
    - 成功（退出码 0，含通道投递成功）→ 写 marker
    - 失败 → **不写 marker**，下次兜底还能再试
+
+**触发方式（v1.3.3）**：
+
+| 主服务状态 | 兜底脚本怎么做 | 为什么 |
+|------------|----------------|--------|
+| 在线 | `POST /api/agents/<AGENT>/cron/<CRON_ID>/run-now`，再轮询 `last_status` | `octop cron run-now` 是**嵌入式**的，会另起一套 `OctopServer`；主服务在跑时等于开第二个 gateway 轮询同一个微信 bot token —— 重复长轮询、日志交错、执行环境和真实服务的不是一套 |
+| 不在线 | `octop --agent <AGENT> cron run-now <CRON_ID>` | 这时候没有别的 runtime，嵌入式是唯一能跑的选择 |
+
+认证走 `scripts/octop_api.py`：从本地控制面库读签名密钥，当场签一个 5 分钟短期 token，
+只放进 HTTP `Authorization` 头（不进 argv / 不进日志 / 不进仓库），仅用标准库。
+可覆盖：`LIFEBRAIN_OCTOP_DB`、`LIFEBRAIN_API_BASE`、`LIFEBRAIN_API_TOKEN`、`OCTOP_PORT`、`OCTOP_BIND_HOST`。
 
 环境变量：`LIFEBRAIN_SCOPE`（推荐）、`LIFEBRAIN_AGENT`、`LIFEBRAIN_HOME`、
 `LIFEBRAIN_CRON_ID`、`LIFEBRAIN_SESSION_KEY`、`LIFEBRAIN_LOG`。
@@ -184,14 +195,21 @@ scope 目录里。别人复制走之后必须自己跑一次 `install_octop.sh`�
 
 ```bash
 octop --agent JVZG0K cron list                 # 看定时任务
-octop --agent JVZG0K cron run-now <job_id>    # 手动跑一次
+python3 <技能目录>/scripts/octop_api.py status --agent JVZG0K --cron <job_id>   # 看上次投递状态
+python3 <技能目录>/scripts/octop_api.py run-now --agent JVZG0K --cron <job_id>  # 手动跑一次（走主服务）
 tail -50 ~/.lifebrain-reminder-JVZG0K.log     # 兜底脚本日志
 python3 <技能目录>/scripts/lifebrain.py status   # 看今天记没记
 ```
 
+> 手动跑一次请用 `octop_api.py run-now`（live API），**别用 `octop cron run-now`**：
+> 后者是嵌入式的，主服务在跑时会多开一套 gateway 抢同一个微信 bot token。
+> 只有主服务不在线时才用嵌入式。
+
 - 提醒没到 → 先确认任务 `enabled`，再确认绑定通道会话还在（`octop --agent JVZG0K chats list`）。
 - 提醒没到且 `last_status=error` → 看 `last_error`：多半是**通道投递失败**（微信掉线、通道凭据过期），
   不是 lifebrain 的问题。marker 会被兜底脚本清掉并重试。
+- 微信报 `ret=-2, errmsg=prepare failed` → 通道的会话上下文（context_token）过期了：
+  让用户**在微信里给 bot 发一条消息**刷新一下即可恢复；仍然失败再重新扫码绑定。
 - 索引对不上 → `lifebrain.py rebuild`，看 `dropped` 是否为空。
 - 数据目录不对 → `lifebrain.py config` 看实际生效的 `data_dir` 和 `scope`。
 - 读到别人的数据 → `lifebrain.py config` 看 `scope.mismatch`：为 true 说明用的是别人的脚本副本，

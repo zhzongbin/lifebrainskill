@@ -361,6 +361,34 @@ octop --agent <AGENT_ID> cron create --trigger "cron:30 7 * * *" \
 - 时区跟随实例配置 `default_timezone`（默认 Asia/Shanghai），不是机器系统时区。
 - 想知道更多（通道投递、兜底触发、实例内共享包）：见 `references/octop-setup.md`。
 
+## 兜底脚本 reminder.sh（可选，但别用错触发方式）
+
+`scripts/reminder.sh` 给 system crontab 当保险：万一 Octop 调度器那一下没触发或投递失败了，
+它会补一次提醒（投递失败会清掉 marker 下轮重试）。
+
+```bash
+# 每个 scope 一条，scope 和 cron id 都要写死，别靠猜
+50 21 * * * LIFEBRAIN_SCOPE=<AGENT_ID> LIFEBRAIN_CRON_ID=<CRON_ID> <SKILL_DIR>/scripts/reminder.sh >> ~/.lifebrain-reminder-<AGENT_ID>.log 2>&1
+```
+
+**它怎么触发提醒（v1.3.3 起）**：
+
+1. 主服务在线 → 走 **live API**：`POST /api/agents/<AGENT_ID>/cron/<CRON_ID>/run-now`，
+   然后轮询这条 cron 的 `last_status`，**只有 `ok` 才写 marker**（`error` 就不写，下轮能重试）。
+2. 主服务不在线 → 才退回 `octop cron run-now`（嵌入式）。
+
+> **为什么不用 `octop cron run-now` 直接跑**：那条 CLI 路径会另起一套嵌入式 `OctopServer`。
+> 主服务已经在跑的时候，等于开第二个 gateway 去轮询同一个微信 bot token —— 重复长轮询、日志交错，
+> 而且 cron 的执行环境和真正服务用户的不是同一套。**主服务在线时一律走 live API。**
+
+认证：`scripts/octop_api.py` 从本地 Octop 控制面库里读签名密钥，**当场签一个 5 分钟的短期 token**，
+只放在 HTTP `Authorization` 头里 —— 不进命令行、不进日志、不进仓库。
+它只依赖 Python 标准库，不 import octop 包。
+
+> 前提：调用者能读本机 Octop 的控制面库（默认 `$OCTOP_HOME/octop.db`，可用 `LIFEBRAIN_OCTOP_DB` 覆盖）。
+> Postgres 部署或者不给本机读库权限的环境，改用 `LIFEBRAIN_API_TOKEN` 环境变量塞一个现成的 access token。
+> 地址默认 `http://127.0.0.1:8088`，可用 `LIFEBRAIN_API_BASE` / `OCTOP_PORT` / `OCTOP_BIND_HOST` 覆盖。
+
 ## 硬性规则
 
 - **不串数据**：同一台机器上可能有别的用户在跑。**只用本 agent 目录下的脚本**

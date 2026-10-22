@@ -8,6 +8,14 @@
 # 用法：
 #   LIFEBRAIN_SCOPE=JVZG0K LIFEBRAIN_CRON_ID=cXXXXXX ./reminder.sh
 #
+# 触发方式（v1.3.3 起）：**优先打主服务的 live API**。
+#   `octop cron run-now` 走的是嵌入式 OctopServer —— 主服务在跑的时候，它会另起一套
+#   gateway/channel runtime 去轮询同一个微信 bot token，导致重复轮询、日志交错，
+#   而且 cron 的执行环境和真正服务用户的环境不是一套。
+#   所以：
+#     * 主服务在线 → POST /api/agents/{agent}/cron/{cron}/run-now（不另起 runtime）
+#     * 主服务不在线 → 才退回 `octop cron run-now`（此时没有第二个 runtime 可冲突）
+#
 # 幂等策略（避免重复打扰）：
 #   1. 今天已有记录            → 直接退出，不打扰
 #   2. 今天已发过提醒(marker)  → 直接退出
@@ -22,10 +30,12 @@
 #
 # 多用户隔离：scope 决定「数据读谁的 + 触发哪个 agent 的任务」。
 #   scope 来自 scope.json（技能副本自带）或 $LIFEBRAIN_SCOPE / $LIFEBRAIN_AGENT / $OCTOP_AGENT_ID。
+#   每个 scope 一条独立的 crontab，不要把两个 scope 写进同一行。
 set -euo pipefail
 
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LI=(python3 "${SKILL_DIR}/scripts/lifebrain.py")
+API=(python3 "${SKILL_DIR}/scripts/octop_api.py")
 
 read_scope() {
   # 1) 显式环境变量
@@ -87,10 +97,13 @@ if pick:
 ' 2>/dev/null || true)"
 fi
 
+# cron 上次的投递结果（live API 优先；拿不到就空）
 cron_status() {
-  # 输出该 cron 的 last_status（拿不到就空）
   [ -n "$CRON_ID" ] || { printf ''; return; }
-  octop --json --agent "$AGENT" cron list 2>/dev/null | python3 -c '
+  local out=""
+  out="$("${API[@]}" status --agent "$AGENT" --cron "$CRON_ID" 2>/dev/null | head -1 || true)"
+  if [ -z "$out" ]; then
+    out="$(octop --json --agent "$AGENT" cron list 2>/dev/null | python3 -c '
 import json, sys
 cid = sys.argv[1]
 try:
@@ -101,7 +114,9 @@ for r in rows:
     if r.get("id") == cid:
         print(r.get("last_status") or "")
         break
-' "$CRON_ID" 2>/dev/null || printf ''
+' "$CRON_ID" 2>/dev/null || printf '')"
+  fi
+  printf '%s' "$out"
 }
 
 if [ "$fired" = "yes" ]; then
@@ -122,9 +137,21 @@ if [ "$fired" = "yes" ]; then
   esac
 fi
 
-# --- 3. 触发提醒（走 Octop 调度器同一条投递链路）---
+# --- 3. 触发提醒 ---
+# 主服务在线 → live API（不会另起一套 runtime）；不在线 → 才用嵌入式 CLI。
 if [ -n "$CRON_ID" ]; then
-  # run-now 会等待执行结束；投递失败时命令非零退出 → 不写 marker，允许下轮重试
+  if "${API[@]}" health 2>/dev/null | grep -q ' ok$'; then
+    log "INFO: 主服务在线，走 live API run-now（$CRON_ID）"
+    if "${API[@]}" run-now --agent "$AGENT" --cron "$CRON_ID" >>"$LOG" 2>&1; then
+      "${LI[@]}" mark-reminder >/dev/null 2>&1 || true
+      log "OK: 已触发提醒任务 $CRON_ID（投递成功）"
+      exit 0
+    fi
+    log "WARN: live API run-now 失败（投递未成功），不写 marker，下轮兜底再试"
+    exit 1
+  fi
+
+  log "INFO: 主服务不在线，退回嵌入式 CLI run-now（此时不会有第二个 runtime）"
   if octop --agent "$AGENT" cron run-now "$CRON_ID" >>"$LOG" 2>&1; then
     "${LI[@]}" mark-reminder >/dev/null 2>&1 || true
     log "OK: 已触发提醒任务 $CRON_ID（投递成功）"

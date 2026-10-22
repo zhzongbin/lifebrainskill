@@ -271,6 +271,76 @@ def test_prompt_templates_are_safe():
         shutil.rmtree(home, ignore_errors=True)
 
 
+def test_reminder_uses_live_api():
+    """兜底脚本必须优先打主服务 live API，嵌入式 CLI 只能当主服务不在线时的退路。
+
+    原因：`octop cron run-now` 会另起一套嵌入式 OctopServer。主服务在跑的时候，
+    这等于开第二个 gateway 去轮询同一个微信 bot token —— 重复轮询、日志交错，
+    cron 的执行环境也和真正服务用户的不是一套。
+    """
+    reminder = (SCRIPTS / "reminder.sh").read_text(encoding="utf-8")
+    api = (SCRIPTS / "octop_api.py").read_text(encoding="utf-8")
+
+    check("reminder.sh 存在 live API 助手", (SCRIPTS / "octop_api.py").exists())
+    check("reminder.sh 调 octop_api.py run-now", "octop_api.py" in reminder and "run-now" in reminder)
+    check("reminder.sh 调 octop_api.py health", "health" in reminder)
+
+    # 嵌入式 CLI 必须排在健康检查之后
+    health_at = reminder.find("octop_api.py")
+    cli_at = reminder.find("cron run-now")
+    check("嵌入式 CLI 在健康检查之后才可能出现", 0 <= health_at < cli_at,
+          f"health@{health_at} cli@{cli_at}")
+    check("主服务在线时不会再走嵌入式 CLI",
+          'if "${API[@]}" health' in reminder and "exit 1" in reminder.split("退回嵌入式 CLI")[0][-400:],
+          "在线分支应当直接退出，不落到 CLI")
+
+    # live API 走 run-now 这个 HTTP 端点
+    check("octop_api.py 用 live API run-now 端点",
+          "/api/agents/{}/cron/{}/run-now" in api, api[-600:])
+    check("octop_api.py 用 live API 读 cron 状态",
+          "/api/agents/{}/cron/{}" in api, api[-600:])
+
+    # 认证：本地签短期 token，只走 HTTP 头，不进 argv / 日志 / 仓库
+    check("octop_api.py 不 import octop 包（纯标准库）",
+          "import octop" not in api and "from octop" not in api, "helper 应当只依赖标准库")
+    check("octop_api.py token 只放 Authorization 头",
+          "Authorization" in api and "bearer" in api.lower(), "token 必须走请求头")
+    check("octop_api.py 不把 token 打到 stdout",
+          'print(token' not in api and 'print(token)' not in api, "token 不能进 stdout/日志")
+    check("octop_api.py 用 HS256 签短期 token",
+          "HS256" in api and "ttl_seconds: int = 300" in api, api[:400])
+
+
+def test_octop_api_token_signing():
+    """本地签出来的 access token 必须能被 Octop 的 HS256 校验通过。"""
+    import base64
+    import hashlib
+    import hmac
+    import importlib.util
+    import json as _json
+
+    spec = importlib.util.spec_from_file_location("lb_octop_api", SCRIPTS / "octop_api.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    secret = b"0123456789abcdef0123456789abcdef"
+    token = mod.sign_access_token(secret, sub=1, uname="admin", role="admin", ttl_seconds=300)
+
+    header, payload, signature = token.split(".")
+    pad = lambda s: s + "=" * (-len(s) % 4)
+    check("token 是三段 JWT", token.count(".") == 2, token[:40])
+    check("header 是 HS256", _json.loads(base64.urlsafe_b64decode(pad(header)))["alg"] == "HS256", header)
+    claims = _json.loads(base64.urlsafe_b64decode(pad(payload)))
+    check("claims 带 sub/uname/role", claims["sub"] == "1" and claims["uname"] == "admin"
+          and claims["role"] == "admin", str(claims))
+    check("claims 有 exp 且是短期的", 0 < claims["exp"] - claims["iat"] <= 900, str(claims))
+
+    expected = base64.urlsafe_b64encode(
+        hmac.new(secret, f"{header}.{payload}".encode(), hashlib.sha256).digest()
+    ).rstrip(b"=").decode()
+    check("签名和 Octop 的 HS256 一致", hmac.compare_digest(expected, signature), signature[:20])
+
+
 def main() -> int:
     test_scope_dirs_dont_overlap()
     test_no_cross_read()
@@ -278,6 +348,8 @@ def main() -> int:
     test_marker_semantics()
     test_installer_picks_own_agent()
     test_prompt_templates_are_safe()
+    test_reminder_uses_live_api()
+    test_octop_api_token_signing()
     print("\n" + "=" * 46)
     print(f"通过 {PASS} / 失败 {FAIL}")
     for f in FAILURES:
