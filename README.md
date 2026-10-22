@@ -5,9 +5,8 @@
 用户永远不手写 Markdown，也永远不手写格式。agent 负责问，用户负责答，落盘由脚本完成。
 
 ```
-~/lifebrain/               # 配置壳（位置固定）
-  config.yaml              # data_dir / reminder_time / timezone
-<数据目录>/                 # 默认 ~/lifebrain，可指到别处
+<scope 根>/                 # 每个 scope 一份，互不重叠（见「多用户隔离」）
+  config.yaml              # data_dir / reminder_time / timezone / owner_scope
   projects.yaml            # 项目注册表（名称 / 类别 work|life / 目标 / 状态）
   todos.yaml               # 目标清单 —— 早间提醒带的就是它
   journals/2026-W43.md     # 周文件 —— 唯一真相源
@@ -15,14 +14,39 @@
   reports/                 # 周报月报存档
 ```
 
+## 多用户隔离（同一台机器上多人时）
+
+一台 Octop 主机上可能同时跑着多个用户（每个用户一个 agent），但它们**共用同一个
+Unix 账号、同一个 `$HOME`**。所以 `~/lifebrain` **不是**天然按用户隔离的。
+
+lifebrain 用 **scope** 解决：scope = "我是谁"（`$OCTOP_AGENT_ID` / `$LIFEBRAIN_SCOPE` /
+`$LIFEBRAIN_AGENT` / 当前工作目录），数据根按 scope 分配：
+
+- 认领了 `~/lifebrain` 的那个 scope（`config.yaml` 里的 `owner_scope`）→ 用 `~/lifebrain`；
+- 其他 scope → 用 `~/.lifebrain/scopes/<scope>`；
+- `$LIFEBRAIN_HOME` 显式指定时优先用它。
+
+`install_octop.sh` 会把归属写进技能目录的 `scope.json`，脚本运行时再按当前进程的 scope
+二次校验——**即使拿错了脚本副本，也不会读到别人的数据**（只会在 stderr 告警）。
+
+```bash
+$LB config | python3 -c 'import json,sys;print(json.load(sys.stdin)["scope"])'
+# {'scope': 'JVZG0K', 'runtime_scope': 'JVZG0K', 'scope_home': '/home/zhzongbin/lifebrain', ...}
+```
+
+> 通道投递由 Octop 保证隔离（cron → 绑定会话 → 通道）。
+> 但**微信 iLink bot 一个微信号同时只能属于一个 bot**：两个 agent 都要推微信的话，
+> 必须用各自的微信号扫码绑定，否则先绑的那个会立刻失效（`ret=-2 prepare failed`）。
+
 ## 首次使用：数据目录由用户定
 
 agent **不会**默默把数据写进默认位置。第一次用的时候它会：
 
 1. 跑 `lifebrain.py config`，看 `initialized` 是不是 false；
-2. 提议默认目录 `~/lifebrain`，同时问用户要不要换成同步盘 / 笔记仓库 / 工作区路径；
+2. 提议默认目录（认领了 legacy 家目录的用户是 `~/lifebrain`，其他用户是各自的 scope 目录），
+   同时问用户要不要换成同步盘 / 笔记仓库 / 工作区路径；
 3. **等用户明确点头**，才执行 `lifebrain.py init --data-dir "<用户选的目录>"`；
-4. 建好目录结构、写 `~/lifebrain/config.yaml`、建本周周文件，再逐个带用户走
+4. 建好目录结构、写 `config.yaml`、建本周周文件，再逐个带用户走
    「登记项目 → 记第一条 → 建每日提醒任务」。
 
 已经有数据时直接接着用，不会擅自迁移或切换目录。
@@ -35,7 +59,8 @@ agent **不会**默默把数据写进默认位置。第一次用的时候它会�
 | 数据读写 | agent 手写 Markdown | `scripts/lifebrain.py` 统一 CLI |
 | 兜底脚本 | `scripts/reminder_omp.sh` | `scripts/reminder.sh` |
 
-两边**共用同一份 `~/lifebrain` 数据**，谁记的对方都看得见。
+两边**共用同一份数据**（同一个 scope 根目录），谁记的对方都看得见。
+不同 scope（不同 agent / 不同用户）则**各用各的目录**，互不可见。
 
 ## Octop 快速上手
 
@@ -55,8 +80,8 @@ octop --agent JVZG0K cron create \
   --prompt "$(bash lifebrain/scripts/install_octop.sh --print-prompt morning)" \
   --task-type agent --fresh-thread
 
-# 4.（可选）system crontab 兜底，21:50 补一次，脚本自带去重
-50 21 * * * ~/.octop/agents/JVZG0K/.octop/skills/lifebrain/scripts/reminder.sh >> ~/.lifebrain-reminder.log 2>&1
+# 4.（可选）system crontab 兜底，21:50 补一次，脚本自带去重；投递失败会自动重试
+50 21 * * * LIFEBRAIN_SCOPE=JVZG0K ~/.octop/agents/JVZG0K/.octop/skills/lifebrain/scripts/reminder.sh >> ~/.lifebrain-reminder-JVZG0K.log 2>&1
 ```
 
 细节见 `lifebrain/references/octop-setup.md`。
@@ -95,9 +120,10 @@ $LB todo done t1                                           # 勾掉（只有显�
 $LB report --week 2026-W43                # 按项目和目标聚合
 $LB rebuild                               # 重算项目索引
 $LB mark-reminder                         # 写"今天已提醒"marker
+$LB mark-reminder --clear                 # 清掉 marker（投递失败时用来允许重试）
 ```
 
-数据目录优先级：环境变量 `LB_DATA_DIR` > `config.yaml:data_dir` > `~/lifebrain`。
+数据目录优先级：环境变量 `LB_DATA_DIR` > `config.yaml:data_dir` > 当前 scope 根目录。
 "今天是哪天"按 `LB_TIMEZONE` > `config.yaml:timezone` > 系统时区算。
 
 ## 铁律

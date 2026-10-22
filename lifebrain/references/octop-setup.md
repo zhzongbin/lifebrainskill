@@ -33,16 +33,25 @@ octop --agent JVZG0K cron create \
 **B. system crontab 兜底（本仓库 `scripts/reminder.sh`）**
 
 ```cron
-50 21 * * * /home/zhzongbin/.octop/agents/JVZG0K/.octop/skills/lifebrain/scripts/reminder.sh >> ~/.lifebrain-reminder.log 2>&1
+50 21 * * * LIFEBRAIN_SCOPE=JVZG0K /home/zhzongbin/.octop/agents/JVZG0K/.octop/skills/lifebrain/scripts/reminder.sh >> ~/.lifebrain-reminder-JVZG0K.log 2>&1
 ```
+
+> **每个 scope 一行**，并且把 `LIFEBRAIN_SCOPE` 钉死。共享主机上多个用户的兜底脚本
+> 会共存于同一个系统 crontab，但各自只读各自的数据、各自触发各自 agent 的 cron。
+> 不钉 `LIFEBRAIN_SCOPE` 时，脚本会退化成"扫第一个 agent"，在多用户机器上必串。
 
 兜底脚本自己做幂等：
 
 1. 今天已记录 → 退出（不打扰）
-2. 今天已有 `.reminder-YYYY-MM-DD` marker → 退出（Octop 定时任务已经提醒过）
-3. 否则 `octop cron run-now <job_id>` 触发同一条投递链路，成功后写 marker
+2. 今天已有 `.reminder-YYYY-MM-DD` marker → 查该 cron 的 `last_status`：
+   - `ok` → 投递成功过，退出
+   - `error` → **投递失败过** → 清掉 marker，继续往下重试（这是"发失败了还能补发"的关键）
+3. 否则 `octop cron run-now <job_id>` 触发同一条投递链路
+   - 成功（退出码 0，含通道投递成功）→ 写 marker
+   - 失败 → **不写 marker**，下次兜底还能再试
 
-环境变量：`LIFEBRAIN_AGENT`、`LIFEBRAIN_CRON_ID`、`LIFEBRAIN_SESSION_KEY`、`LIFEBRAIN_LOG`。
+环境变量：`LIFEBRAIN_SCOPE`（推荐）、`LIFEBRAIN_AGENT`、`LIFEBRAIN_HOME`、
+`LIFEBRAIN_CRON_ID`、`LIFEBRAIN_SESSION_KEY`、`LIFEBRAIN_LOG`。
 
 ## 2. 路径映射
 
@@ -50,10 +59,16 @@ octop --agent JVZG0K cron create \
 |------|--------------------|
 | 技能目录 | `/home/zhzongbin/.octop/agents/JVZG0K/.octop/skills/lifebrain/` |
 | 脚本 | `<技能目录>/scripts/lifebrain.py` |
-| 数据目录 | `~/lifebrain`（与 omp 版**共用同一份数据**，两个 agent 看到的内容一致） |
+| 数据目录 | `~/lifebrain`（**只有认领了它的那个 scope 能用**）；别的 scope 是 `~/.lifebrain/scopes/<scope>` |
 | Agent ID | `JVZG0K`（技能目录名就是 agent id） |
+| scope 声明 | `<技能目录>/scope.json`（安装时写入，`{"scope": "JVZG0K", "home": "…"}`） |
 
-数据目录留在 `~/lifebrain` 是刻意的：omp 版和 Octop 版共用一份周文件，谁记的对方都看得见。
+**同一台机器上多个用户时，`~/lifebrain` 不再天然隔离。** 共享主机上每个 agent 必须
+有自己的一份数据目录，靠 `scope` 机制分流：认领了 `~/lifebrain` 的那个 scope 用 legacy
+目录，其余 scope 用 `~/.lifebrain/scopes/<scope>`。判定依据是 `$OCTOP_AGENT_ID`
+（Octop 给每个 agent 注入）→ `$LIFEBRAIN_SCOPE` → `$LIFEBRAIN_AGENT` → 工作目录。
+
+`lifebrain.py config` 的 `scope` 字段随时可以自检当前解析到哪一份。
 
 ## 3. 通道投递的写作约束
 
@@ -153,15 +168,31 @@ curl -s -X PATCH "http://127.0.0.1:8088/api/agents/<AGENT_ID>" \
 注意：包内技能和 agent 工作区里的技能**同名时，包里的版本优先**。
 所以工作区那份是"给兜底脚本用的本地安装"，包里的那份是"全实例共用的最新版"——两边内容一致时没有歧义。
 
+**从包复制到别的用户时**：包里的 `lifebrain/` **不含任何数据**，数据永远在各自机器上的
+scope 目录里。别人复制走之后必须自己跑一次 `install_octop.sh`（它会写 `scope.json`、
+认领或分配数据目录），否则那份脚本没有 scope 声明，会退回到"扫第一个 agent"的旧行为。
+
+**重要**：`~/.octop/agents/*` 下有多个 agent 时，**绝不能**用
+`ls -d ~/.octop/agents/*/... | head -1` 找脚本——那会拿到别人的副本。
+用 `$OCTOP_SKILLS_DIR`（Octop 给每个 agent 注入的自己的技能目录）：
+
+```bash
+[ -n "${OCTOP_SKILLS_DIR:-}" ] && [ -f "$OCTOP_SKILLS_DIR/lifebrain/scripts/lifebrain.py" ] && LB_SCRIPT="$OCTOP_SKILLS_DIR/lifebrain/scripts/lifebrain.py"
+```
+
 ## 6. 排错
 
 ```bash
 octop --agent JVZG0K cron list                 # 看定时任务
 octop --agent JVZG0K cron run-now <job_id>    # 手动跑一次
-tail -50 ~/.lifebrain-reminder.log            # 兜底脚本日志
+tail -50 ~/.lifebrain-reminder-JVZG0K.log     # 兜底脚本日志
 python3 <技能目录>/scripts/lifebrain.py status   # 看今天记没记
 ```
 
 - 提醒没到 → 先确认任务 `enabled`，再确认绑定通道会话还在（`octop --agent JVZG0K chats list`）。
+- 提醒没到且 `last_status=error` → 看 `last_error`：多半是**通道投递失败**（微信掉线、通道凭据过期），
+  不是 lifebrain 的问题。marker 会被兜底脚本清掉并重试。
 - 索引对不上 → `lifebrain.py rebuild`，看 `dropped` 是否为空。
-- 数据目录不对 → `lifebrain.py config` 看实际生效的 `data_dir`。
+- 数据目录不对 → `lifebrain.py config` 看实际生效的 `data_dir` 和 `scope`。
+- 读到别人的数据 → `lifebrain.py config` 看 `scope.mismatch`：为 true 说明用的是别人的脚本副本，
+  改用 `$OCTOP_SKILLS_DIR` 下那份。

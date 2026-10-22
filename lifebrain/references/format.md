@@ -5,16 +5,44 @@
 
 ## 目录
 ```
-~/lifebrain/                # 配置壳（位置固定）
-  config.yaml               # data_dir / reminder_time / timezone
-<数据目录>/                  # 默认 ~/lifebrain，可被 config.yaml:data_dir 指到别处
-  projects.yaml             # 项目注册表
-  todos.yaml                # 待办清单（早间提醒带的就是它）
-  journals/2026-W43.md      # 周文件（唯一真相源，ISO 周命名）
-  projects/<name>.md        # 项目索引（脚本重算，只读）
-  reports/                  # 周报月报存档
-  .reminder-YYYY-MM-DD      # 当天提醒已发 marker（防止重复打扰）
+<scope 根>/                   # 每个 scope 一份，互不重叠
+  config.yaml                # data_dir / reminder_time / timezone / owner_scope
+  projects.yaml              # 项目注册表
+  todos.yaml                 # 待办清单（早间提醒带的就是它）
+  journals/2026-W43.md       # 周文件（唯一真相源，ISO 周命名）
+  projects/<name>.md         # 项目索引（脚本重算，只读）
+  reports/                   # 周报月报存档
+  .reminder-YYYY-MM-DD       # 当天提醒已发 marker（防止重复打扰）
 ```
+
+**scope 根**由脚本按"谁在跑"自动决定（见下节）：
+
+| scope | 根目录 |
+|-------|--------|
+| 认领了 legacy 家目录的 agent | `~/lifebrain`（`config.yaml` 里有 `owner_scope: <agent id>`） |
+| 其他 agent / 其他用户 | `~/.lifebrain/scopes/<scope>` |
+| 显式指定 | `$LIFEBRAIN_HOME` 指定的那个目录 |
+
+## scope（多用户隔离）
+
+同一台 Octop 主机上可能同时跑着多个用户（每个用户一个 agent），但它们**共用同一个
+Unix 账号、同一个 `$HOME`**。所以 `~/lifebrain` 天然**不是**按用户隔离的——
+不加区分地读它，就会读到别人的记录。
+
+脚本按下面的顺序判定"我是谁"（先到先得）：
+
+1. `$LIFEBRAIN_SCOPE` — 显式指定（推荐在 crontab 行里钉死）
+2. `$LIFEBRAIN_AGENT` — agent id
+3. `$OCTOP_AGENT_ID` — Octop agent 运行时注入，每个 agent 一份
+4. 当前工作目录落在 `$OCTOP_HOME/agents/<id>/` 下 → 取 `<id>`
+5. 都没有 → 用 skill 目录里 `scope.json` 声明的 scope（安装时写入）
+
+数据根随之确定：**`$LIFEBRAIN_HOME` > 认领了 `~/lifebrain` 的 scope 用 `~/lifebrain` >
+其他 scope 用 `~/.lifebrain/scopes/<scope>`**。
+
+`$LB config` 会打印 `scope` 字段（`runtime_scope` / `declared_scope` / `home` /
+`owner_scope` / `mismatch`）。`mismatch` 为 true 说明**你正在用别人的脚本副本**，
+此时脚本仍按 `runtime_scope` 解析数据目录（不会读到别人的数据），但脚本版本可能不对。
 
 ## todos.yaml（目标清单）
 
@@ -42,15 +70,17 @@ todos:
 
 ## config.yaml
 
-**位置固定在 `~/lifebrain/config.yaml`**（不随数据目录移动），里面的 `data_dir` 指向真正的数据目录。
+**位置在 scope 根目录**（`~/lifebrain/config.yaml` 或 `~/.lifebrain/scopes/<scope>/config.yaml`），
+里面的 `data_dir` 指向真正的数据目录。
 
 ```yaml
 data_dir: ~/lifebrain      # 数据目录，可指向任意本机可写路径
 reminder_time: "21:30"     # 仅供人读；实际调度在 Octop cron / crontab
 timezone: "Asia/Shanghai"  # 可选；决定"今天"是哪天（默认取系统时区）
+owner_scope: JVZG0K        # 可选；认领了 ~/lifebrain 的那个 scope 才有这行
 ```
 
-优先级：环境变量 `LB_DATA_DIR` > `config.yaml:data_dir` > `~/lifebrain`。
+优先级：环境变量 `LB_DATA_DIR` > `config.yaml:data_dir` > scope 根目录。
 时区优先级：`LB_TIMEZONE` > `config.yaml:timezone` > 系统时区。
 
 首次使用必须由用户确认数据目录后，用 `lifebrain.py init --data-dir <目录>` 生成，

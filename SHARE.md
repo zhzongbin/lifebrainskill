@@ -11,6 +11,7 @@ lifebrain/                 ← 这才是「一个 skill 目录」，SKILL.md 在
   references/octop-setup.md← Octop 运行时细节（通道投递、时区、兜底）
   scripts/lifebrain.py     ← 核心 CLI（status/show/append/project/report/rebuild/mark-reminder/todo）
   scripts/rebuild_index.py ← 项目索引重算
+  scripts/scope.py         ← scope 解析（多用户隔离的唯一入口）
   scripts/reminder.sh      ← Octop 版提醒入口（system cron → octop cron run-now）
   scripts/reminder_omp.sh  ← 原 omp 无头 CLI 版（其他 agent 运行时用）
   scripts/install_octop.sh ← 一键部署到 Octop 技能目录
@@ -18,6 +19,10 @@ lifebrain/                 ← 这才是「一个 skill 目录」，SKILL.md 在
 
 关键点：**分享的是 `lifebrain/` 这一层**（SKILL.md 必须在顶层）。
 路径全是自解析的，换机器/换 agent/换实例都不用改。
+
+> **包里没有任何数据。** 数据永远在各自机器的 scope 目录里，不会随包走。
+> 但"目录长什么样"取决于**谁在跑**——所以对方装完必须跑一次
+> `install_octop.sh`（它会写 `scope.json`、分配数据根）。详见下面的「多用户隔离」。
 
 ---
 
@@ -56,6 +61,66 @@ bash lifebrainskill/lifebrain/scripts/install_octop.sh --agent <AGENT_ID>
 
 > 时间按**实例时区**解释（Octop 配置 `default_timezone`，默认 Asia/Shanghai），
 > 不是机器的系统时区——很多机器是 UTC，直接 `cron:30 21 * * *` 会差 8 小时。
+
+---
+
+## 多用户隔离（同一台机器上多人时必读）
+
+> **一个微信号 ≠ 一个 agent ≠ 一个数据目录。** 这两件事是分开的。
+
+### 同一个 Octop 实例里的其他用户
+
+Octop 的每个用户有自己的 agent，但**所有 agent 跑在同一个 Unix 账号下、共用同一个 `$HOME`**。
+所以 `~/lifebrain` **不是**天然按用户隔离的——不加区分地读它，就会读到别人的记录。
+
+本 skill 用 **scope** 机制解决：
+
+| 概念 | 含义 |
+|------|------|
+| scope | "我是谁"：一个 agent id（`$OCTOP_AGENT_ID` / `$LIFEBRAIN_SCOPE` / `$LIFEBRAIN_AGENT` / 工作目录） |
+| scope 根 | 这个 scope 的数据目录 |
+| `scope.json` | 装在**技能目录**里，声明"这份副本属于谁、数据放哪" |
+
+分配规则：
+
+- 认领了 legacy `~/lifebrain` 的那个 scope（`config.yaml` 里的 `owner_scope`）→ 用 `~/lifebrain`；
+- 其他 scope → 用 `~/.lifebrain/scopes/<scope>`；
+- `$LIFEBRAIN_HOME` 显式指定时优先用它。
+
+**对方（任何新用户）装完必须做这一步**：
+
+```bash
+bash lifebrain/scripts/install_octop.sh --agent <AGENT_ID>
+```
+
+它会：① 在技能目录写 `scope.json`；② 按上面的规则分配数据根；③ 认领 legacy 家目录时写上 `owner_scope`。
+
+**如果对方的 `~/lifebrain` 里已经有别人的数据**（同机多人时很常见），安装脚本**不会**自动认领，
+而是给这个 agent 分配独立目录，并在输出里提示。要接管 legacy 目录必须显式：
+
+```bash
+bash lifebrain/scripts/install_octop.sh --agent <AGENT_ID> --home ~/lifebrain
+```
+
+### 脚本路径不能乱扫
+
+```bash
+# ❌ 绝对不要这样：会拿到别的 agent 的脚本副本
+LB_SCRIPT="$(ls -d ~/.octop/agents/*/.octop/skills/lifebrain/scripts/lifebrain.py | head -1)"
+
+# ✅ 用 Octop 给每个 agent 注入的自己的技能目录
+LB_SCRIPT="$OCTOP_SKILLS_DIR/lifebrain/scripts/lifebrain.py"
+```
+
+就算路径拿错了，脚本也会按**当前进程的 scope** 解析数据目录（不会读到别人的数据），
+并在 stderr 打印一条 scope 不一致的告警——但版本可能不对，所以还是别拿错。
+
+### 通道投递
+
+cron 任务 → 绑定会话 → 通道，这条链路由 Octop 保证隔离。
+**但微信 iLink bot 是"一个微信号同一时间只属于一个 bot"**：
+如果两个 agent 想都推微信，他们必须用**各自的微信号**扫码绑定。
+用同一个微信号给第二个 agent 扫码，第一个 bot 会立刻失效（发送报 `ret=-2 prepare failed`）。
 
 ---
 
@@ -126,7 +191,10 @@ curl -s -X PATCH "$BASE/api/agents/<AGENT_ID>" \
 包里的技能挂到 agent 上后，会作为「全局共享技能」出现在所有挂了该包的 agent 的技能列表里；
 用户也可以在控制台里把它复制进自己的 workspace。
 
-> 每个用户的数据目录都是自己的 `~/lifebrain`，不会串；首次使用由各自的 agent 单独问过用户再初始化。
+> **复制 ≠ 隔离。** 复制到 workspace 的只是**代码**，数据仍然按 scope 分配。
+> 对方第一次用之前必须跑一次 `install_octop.sh`（或让 agent 按 SKILL.md 的流程 `init`），
+> 它的数据才会落到自己的 scope 目录里。**不要**假设"每个人有自己的 `~/lifebrain`"——
+> 同一台机器上多个 Octop 用户共用一个 `$HOME`，不隔离就是互相读到对方的记录。
 
 ---
 
@@ -162,9 +230,11 @@ Octop 实例内也能从 SkillHub 搜到并装进共享包（控制台 → 技�
 
 - [ ] `lifebrain/SKILL.md` 的 frontmatter 里 `name` 和 `description` 齐全（description 是触发词，删了就不好用了）
 - [ ] 脚本里没有写死任何人的用户名/agent id/会话 key
+- [ ] 脚本里没有 `ls -d ~/.octop/agents/*` 这种会串到别的 agent 的路径扫描
 - [ ] `scripts/lifebrain.py status` 在干净机器上能跑（只需要 python3；PyYAML 有就更好，没有会自动降级）
-- [ ] `scripts/__pycache__` 别打进包里
+- [ ] `scripts/__pycache__` 别打进包里；`scope.json` 是**安装时生成**的，不进包
 - [ ] 对方首次使用时 agent 会先问「记录放哪儿」，确认后才建目录；不需要预置 `~/lifebrain`
+- [ ] 装完跑一次 `install_octop.sh --agent <ID>`，确认 `scope.json` 里的 `scope` / `home` 正确
 
 ## 常见坑
 
@@ -174,6 +244,9 @@ Octop 实例内也能从 SkillHub 搜到并装进共享包（控制台 → 技�
 | 提醒发到网页控制台而不是微信 | cron 是用 CLI 建的（绑 dashboard） | 在聊天里让 agent 用 `cronjob_create` 重建任务 |
 | CLI 建的任务不触发 | 写的是本地 DB，服务没重载 | `octop service restart`，或改用聊天里建 |
 | 提醒来两次 | 调度器 + 兜底 crontab 都发了 | 靠 `mark-reminder` 的 marker 去重，别删兜底脚本 |
+| **发不出去（`ret=-2 prepare failed`）** | 微信 bot 掉线：同一个微信号被拿去绑了别的 bot | 用自己的微信号重新扫码绑定；`getconfig` 成功但 `sendmessage` 失败就是这个症状 |
+| **读到别人的记录** | 用了 `ls ~/.octop/agents/*` 拿到别人的脚本副本，或没装 `scope.json` | `$LB config` 看 `scope.mismatch`；改用 `$OCTOP_SKILLS_DIR` 下那份；重跑 `install_octop.sh` |
+| **两个用户抢同一个 `~/lifebrain`** | 同机共用 `$HOME`，legacy 家目录没标主人 | `config.yaml` 里写 `owner_scope`；其他 scope 用 `~/.lifebrain/scopes/<scope>` |
 | agent 报「项目未登记」 | 写入前项目没进 `projects.yaml` | 先 `$LB project add <名> --category work|life --goal "…"` |
 | agent 报「todo tN 不存在」 | `append --todo` 指向了不存在的目标 | 先 `$LB todo add`，或用 `todo list` 核对 id |
 | 早间提醒只有标题没有进展 | 目标还没挂过工作记录 | 晚间记录时用 `append --todo <id>` 关联；旧记录不会被自动补关联 |

@@ -41,6 +41,16 @@ from rebuild_index import (  # noqa: E402
     split_entry_line,
     to_hours,
 )
+from scope import (  # noqa: E402
+    declared_scope,
+    effective_scope,
+    legacy_home,
+    legacy_owner,
+    runtime_scope,
+    scope_home,
+    scope_mismatch,
+    scope_status,
+)
 
 TIME_RE = re.compile(r"^(\d{2}:\d{2}|--:--)$")
 DUR_RE = re.compile(r"^[\d.]+[hm]$")
@@ -594,6 +604,15 @@ def cmd_config(args) -> int:
     root = Path(args.data_dir).expanduser() if args.data_dir else default_data_dir()
     cfg_file = config_path()
     cfg = read_yaml(cfg_file) if cfg_file.exists() else {}
+    info = scope_status()
+    mismatch = scope_mismatch()
+    if mismatch:
+        # 不致命，但必须让人看见：跑的是别的 agent 的脚本副本
+        print(
+            f"[lifebrain] ⚠ scope 不一致：当前进程属于 {mismatch[1]}，"
+            f"这份脚本属于 {mismatch[0]}；数据目录已按 {mismatch[1]} 解析。",
+            file=sys.stderr,
+        )
     out({
         "data_dir": str(root),
         "data_dir_source": _source_for(args),
@@ -606,8 +625,9 @@ def cmd_config(args) -> int:
         "projects_file": str(registry_path(root)),
         "index_dir": str(root / "projects"),
         "reports_dir": str(root / "reports"),
-        "agent_id": os.environ.get("LIFEBRAIN_AGENT", "JVZG0K"),
+        "agent_id": effective_scope() or "JVZG0K",
         "skill_dir": str(Path(__file__).resolve().parent.parent),
+        "scope": info,
     })
     return 0
 
@@ -645,6 +665,15 @@ def cmd_init(args) -> int:
     cfg_body = {"data_dir": str(target), "reminder_time": reminder}
     if tz_name:
         cfg_body["timezone"] = str(tz_name)
+    # 认领 legacy 家目录：~/lifebrain 归第一个用它的 scope 所有，
+    # 其他 scope 各自用 ~/.lifebrain/scopes/<scope>，绝不共享数据。
+    scope = effective_scope()
+    try:
+        is_legacy_cfg = cfg_file.resolve() == (legacy_home() / "config.yaml").resolve()
+    except OSError:  # pragma: no cover - 防御性
+        is_legacy_cfg = False
+    if is_legacy_cfg and scope and not old_cfg.get("owner_scope"):
+        cfg_body["owner_scope"] = scope
     # 保留用户自己加的键，只覆盖我们管理的这几个
     merged = dict(old_cfg)
     merged.update(cfg_body)
@@ -680,6 +709,7 @@ def cmd_init(args) -> int:
         "reminder_time": reminder,
         "timezone": tz_name,
         "initialized": _initialized(target),
+        "scope": scope_status(),
         "next_steps": [
             "登记项目：lifebrain.py project add <名称> --category work|life --goal \"一句话目标\"",
             "记第一条：lifebrain.py append --project <名称> --duration 1h --content \"做了什么\"",
@@ -718,6 +748,7 @@ def cmd_status(args) -> int:
     out({
         "data_dir": str(root),
         "data_dir_source": _source_for(args),
+        "scope": scope_status(),
         "initialized": _initialized(root),
         "date": target.isoformat(),
         "today": today.isoformat(),
@@ -1007,10 +1038,22 @@ def cmd_rebuild(args) -> int:
 
 
 def cmd_mark_reminder(args) -> int:
+    """写/清「今天已提醒」标记。
+
+    标记语义：**投递成功才算数**。
+    agent 侧写标记只是为了防止同一天重复打扰；真正的兜底脚本会在发现
+    cron 上次投递失败时用 ``--clear`` 清掉它并重试。
+    """
     root = Path(args.data_dir).expanduser() if args.data_dir else default_data_dir()
     target = parse_date(args.date) if args.date else now_local().date()
-    root.mkdir(parents=True, exist_ok=True)
     marker = root / f".reminder-{target.isoformat()}"
+    if getattr(args, "clear", False):
+        existed = marker.exists()
+        if existed:
+            marker.unlink()
+        out({"ok": True, "cleared": existed, "marker": str(marker), "date": target.isoformat()})
+        return 0
+    root.mkdir(parents=True, exist_ok=True)
     marker.write_text(now_local().isoformat(timespec="seconds"), encoding="utf-8")
     out({"ok": True, "marker": str(marker), "date": target.isoformat()})
     return 0
@@ -1089,8 +1132,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--days", type=int, default=7, help="review 时回看天数，默认 7")
     p.set_defaults(func=cmd_todo)
 
-    p = sub.add_parser("mark-reminder", help="写下今日提醒已触发的标记（防重复）")
+    p = sub.add_parser("mark-reminder", help="写下今日提醒已触发的标记（防重复）；--clear 可清掉")
     p.add_argument("--date", default=None)
+    p.add_argument("--clear", action="store_true", help="删除标记（投递失败时用来允许重试）")
     p.set_defaults(func=cmd_mark_reminder)
 
     return ap

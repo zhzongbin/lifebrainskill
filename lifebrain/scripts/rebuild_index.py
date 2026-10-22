@@ -31,41 +31,16 @@ DATE_HEAD = re.compile(r"^## (\d{4}-\d{2}-\d{2})\s*$")
 TODO_REF = re.compile(r"^t\d+$")
 
 
-def config_home() -> Path:
-    """Fixed home for the config file: ``~/lifebrain/config.yaml``.
-
-    The config *shell* always lives here; ``data_dir`` inside it may point
-    anywhere (another disk, a sync folder, a workspace). Keeping the config in
-    one fixed place avoids two configs drifting apart.
-    """
-    return Path.home() / "lifebrain"
-
-
-def config_path() -> Path:
-    return config_home() / "config.yaml"
-
-
-def data_dir_source() -> str:
-    """Where the current data dir came from: env / config / default."""
-    if os.environ.get("LB_DATA_DIR"):
-        return "env:LB_DATA_DIR"
-    cfg = config_path()
-    if cfg.exists() and read_yaml(cfg).get("data_dir"):
-        return "config"
-    return "default"
-
-
-def default_data_dir() -> Path:
-    """Resolve the data dir: $LB_DATA_DIR > config.yaml:data_dir > ~/lifebrain."""
-    env = os.environ.get("LB_DATA_DIR")
-    if env:
-        return Path(env).expanduser()
-    cfg = config_path()
-    if cfg.exists():
-        data = read_yaml(cfg).get("data_dir")
-        if data:
-            return Path(str(data)).expanduser()
-    return config_home()
+# 家目录 / 配置 / 数据目录的定位统一走 scope.py（多用户隔离的唯一入口）。
+# 这里只做转出，保持 `from rebuild_index import config_home` 这类旧用法可用。
+from scope import (  # noqa: E402,F401
+    config_home,
+    config_path,
+    data_dir_source,
+    default_data_dir,
+    scope_home,
+    scope_status,
+)
 
 
 def read_yaml(path: Path) -> dict:

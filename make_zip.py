@@ -17,6 +17,8 @@ ROOT = pathlib.Path(__file__).resolve().parent
 SKILL_DIR = ROOT / "lifebrain"
 EXCLUDE_PARTS = {"__pycache__", ".git", ".pytest_cache", ".DS_Store"}
 EXCLUDE_SUFFIX = {".pyc", ".pyo"}
+# scope.json 是安装时按"谁在装"生成的，不该进包
+EXCLUDE_NAMES = {"scope.json"}
 
 
 def main() -> int:
@@ -31,6 +33,7 @@ def main() -> int:
         p for p in sorted(SKILL_DIR.rglob("*"))
         if p.is_file()
         and not (set(p.parts) & EXCLUDE_PARTS)
+        and p.name not in EXCLUDE_NAMES
         and p.suffix not in EXCLUDE_SUFFIX
     ]
     if not files:

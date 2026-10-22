@@ -26,30 +26,55 @@ metadata:
 | 东西 | 位置 |
 |------|------|
 | 脚本入口 | **本 skill 目录**下的 `scripts/lifebrain.py`（安装路径因实例而异，见下方解析） |
-| 配置文件 | `~/lifebrain/config.yaml` — **位置固定**，里面 `data_dir` 指向真正的数据目录 |
-| 数据目录 | 默认 `~/lifebrain`；可用环境变量 `LB_DATA_DIR` 或 `config.yaml:data_dir` 覆盖 |
+| 配置文件 | `<scope 根>/config.yaml` — 位置随 scope 变（见下方「多用户隔离」） |
+| 数据目录 | 默认 = scope 根；可用 `LB_DATA_DIR` 或 `config.yaml:data_dir` 覆盖 |
 | 周文件 | `<数据目录>/journals/YYYY-Www.md` — **唯一真相源** |
 | 项目注册表 | `<数据目录>/projects.yaml` |
 | 项目索引 | `<数据目录>/projects/<name>.md` — **脚本生成，禁止手改** |
 | 报告存档 | `<数据目录>/reports/YYYY-Www.md` / `YYYY-MM.md` |
 
-> 路径解析顺序：环境变量 `LB_DATA_DIR` → `~/lifebrain/config.yaml` 的 `data_dir` → 默认 `~/lifebrain`。
+> 路径解析顺序：环境变量 `LB_DATA_DIR` → `<scope 根>/config.yaml` 的 `data_dir` → scope 根。
 > `$LB config` 会告诉你当前生效的是哪一个（`data_dir_source` 字段）。
+
+### 多用户隔离（同一台机器多用户时必读）
+
+一台 Octop 主机上可能同时跑**多个用户**（每个用户一个 agent），但它们共用同一个 Unix 账号、
+同一个 `$HOME`。**`~/lifebrain` 不是按用户隔离的**——不加区分地读它，就会读到别人的记录。
+
+脚本按 **scope** 分流（scope = 你的 agent id）：
+
+| 环节 | 规则 |
+|------|------|
+| scope 判定 | `$LIFEBRAIN_SCOPE` → `$LIFEBRAIN_AGENT` → `$OCTOP_AGENT_ID` → 当前目录是不是 `~/.octop/agents/<id>/` → 都没有就用技能副本里的 `scope.json` |
+| 数据根 | 认领了 `~/lifebrain` 的那个 scope（`config.yaml` 里 `owner_scope`）用 `~/lifebrain`；其他 scope 用 `~/.lifebrain/scopes/<scope>`，**互不重叠** |
+| 二次校验 | 脚本比对「自己属于谁」和「当前进程属于谁」，不一致就往 stderr 打警告，并**按当前进程解析数据目录**——跑错脚本也读不到别人的数据 |
+| 显式覆盖 | `LIFEBRAIN_HOME=<目录>` 可以把整个根目录钉死 |
+
+`$LB config` 的 `scope` 字段会打印 `scope` / `runtime_scope` / `declared_scope` / `home` /
+`owner_scope` / `mismatch`。**任何一次读写前先确认 `runtime_scope` 是自己的 agent id**。
 
 ### 先解析脚本路径（安装位置因实例而异，别写死）
 
+**只取当前 agent 自己目录里的那份**——不要用 `ls ~/.octop/agents/*`（那会挑到别人的 agent）：
+
 ```bash
-LB_SCRIPT="$(ls -d ~/.octop/agents/*/.octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
-[ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d .octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
-[ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d ~/.octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
-[ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d ~/.octop/skill-packages/*/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
+LB_SCRIPT=""
+[ -n "${OCTOP_SKILLS_DIR:-}" ] && [ -f "$OCTOP_SKILLS_DIR/lifebrain/scripts/lifebrain.py" ] && LB_SCRIPT="$OCTOP_SKILLS_DIR/lifebrain/scripts/lifebrain.py"
+[ -z "$LB_SCRIPT" ] && [ -f "$PWD/.octop/skills/lifebrain/scripts/lifebrain.py" ] && LB_SCRIPT="$PWD/.octop/skills/lifebrain/scripts/lifebrain.py"
+[ -z "$LB_SCRIPT" ] && [ -n "${OCTOP_AGENT_ID:-}" ] && [ -f "$HOME/.octop/agents/$OCTOP_AGENT_ID/.octop/skills/lifebrain/scripts/lifebrain.py" ] && LB_SCRIPT="$HOME/.octop/agents/$OCTOP_AGENT_ID/.octop/skills/lifebrain/scripts/lifebrain.py"
+[ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d "$HOME"/.octop/agents/*/.octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
+[ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d "$HOME"/.octop/skill-packages/*/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
 LB="python3 $LB_SCRIPT"
 ```
 
-前三条是「装在 agent 工作区里」的情况，第四条是「从实例级全局技能包挂载过来」的情况
+前三条是「装在 agent 工作区里」的情况（`$OCTOP_SKILLS_DIR` 由 Octop 注入，指向**本 agent**
+的技能目录），第四条是「从实例级全局技能包挂载过来」的情况
 （包目录在 `~/.octop/skill-packages/<包ID>/skills/lifebrain/`，不需要复制到工作区也能跑）。
-三条都没命中就 `find ~ -path '*skills/lifebrain/scripts/lifebrain.py' 2>/dev/null | head -1`。
+都还没命中就 `find ~ -path '*skills/lifebrain/scripts/lifebrain.py' 2>/dev/null | head -1`。
 解析一次后本轮对话复用 `$LB`；`$LB config` 会打印当前真实路径，可用它自检。
+
+> 万一还是拿到了别的 agent 的脚本副本，**数据不会串**：脚本会按当前进程的 scope 重新解析数据目录，
+> 并在 stderr 打出 mismatch 警告。
 
 所有子命令都往 stdout 输出 JSON，错误走 stderr 并返回非 0 —— **你只管解析 JSON，不用肉眼读 Markdown**。
 
@@ -68,7 +93,7 @@ LB="python3 $LB_SCRIPT"
 | `$LB todo review [--days 7]` | 目标进展复盘：今天该聚焦哪几个、投入 vs 预计、卡住没动的 |
 | `$LB todo update <id> [--goal G] [--estimate E] [--due D]` | 改目标的定义 / 预计投入 / 截止日 |
 | `$LB todo done <id> [--note "…"]` / `$LB todo rm <id>` | 完成 / 删除目标 |
-| `$LB mark-reminder` | 写「今天已提醒」marker（防重复打扰） |
+| `$LB mark-reminder [--clear]` | 写 / 清「今天已提醒」marker（防重复打扰；投递失败时用 `--clear` 清掉以便重试） |
 
 ### 目标 vs 待办：这是两回事
 
@@ -127,7 +152,8 @@ $LB init --data-dir "<目录>" --timezone Asia/Shanghai   # 可选：指定时�
 
 `init` 会做四件事，输出 JSON 告诉你结果：
 1. 建目录结构 `journals/ projects/ reports/` 和 `projects.yaml`；
-2. 写固定配置文件 `~/lifebrain/config.yaml`（里面 `data_dir` 指向刚才的目录）；
+2. 写配置文件 `<scope 根>/config.yaml`（里面 `data_dir` 指向刚才的目录；
+   若这个 scope 认领了 `~/lifebrain`，`config.yaml` 里会多一行 `owner_scope: <你的 agent id>`）；
 3. 建本周周文件，把今天标成「（无记录）」；
 4. 返回 `created` 列表和 `next_steps`。
 
@@ -141,7 +167,7 @@ $LB init --data-dir "<目录>" --timezone Asia/Shanghai   # 可选：指定时�
 
 - 已初始化的目录再跑 `init` 是幂等的，不会覆盖数据。
 - 想换目录必须加 `--force`（只改配置，**不搬数据**），而且必须用户明确说"要换"才能做。
-- 配置文件位置永远是 `~/lifebrain/config.yaml`（固定"壳"），数据目录可以是任何地方。
+- 配置文件在 scope 根目录（`~/lifebrain` 或 `~/.lifebrain/scopes/<scope>`）里，**每个 scope 一份**，互不干扰。
 - 用户说"删掉重来"前不要动已有文件。
 
 ## 模式
@@ -254,11 +280,16 @@ $LB project add 健身 --category life --goal "保持体能"
 ```
 [lifebrain-reminder] 执行 lifebrain skill 的提醒模式（无头定时会话，回复会推送到用户所在通道）。
 
-1. 先解析脚本路径：
-   LB_SCRIPT="$(ls -d ~/.octop/agents/*/.octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
-   [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d .octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
-   [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d ~/.octop/skill-packages/*/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
-   两条都没命中就 find ~ -path '*skills/lifebrain/scripts/lifebrain.py' | head -1
+1. 先解析脚本路径（只取本 agent 的那份，不要用 ls ~/.octop/agents/*）：
+   LB_SCRIPT=""
+   [ -n "${OCTOP_SKILLS_DIR:-}" ] && [ -f "$OCTOP_SKILLS_DIR/lifebrain/scripts/lifebrain.py" ] && LB_SCRIPT="$OCTOP_SKILLS_DIR/lifebrain/scripts/lifebrain.py"
+   [ -z "$LB_SCRIPT" ] && [ -f "$PWD/.octop/skills/lifebrain/scripts/lifebrain.py" ] && LB_SCRIPT="$PWD/.octop/skills/lifebrain/scripts/lifebrain.py"
+   [ -z "$LB_SCRIPT" ] && [ -n "${OCTOP_AGENT_ID:-}" ] && [ -f "$HOME/.octop/agents/$OCTOP_AGENT_ID/.octop/skills/lifebrain/scripts/lifebrain.py" ] && LB_SCRIPT="$HOME/.octop/agents/$OCTOP_AGENT_ID/.octop/skills/lifebrain/scripts/lifebrain.py"
+   [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d "$HOME"/.octop/agents/*/.octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
+   [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d "$HOME"/.octop/skill-packages/*/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
+   都还没命中就 find ~ -path '*skills/lifebrain/scripts/lifebrain.py' | head -1
+1.5 跑一次 python3 "$LB_SCRIPT" config，确认 scope.runtime_scope 是本 agent（不是别人的）；
+   不一致就换用 $OCTOP_SKILLS_DIR 下那份，绝不读别人的数据。
 2. 运行 python3 "$LB_SCRIPT" status --lookback 3，读 JSON。
 2.5 若 status 里 initialized=false（用户还没确认数据目录）→ 只回一句「还没定记录放哪儿，回我一句我就给你建好」
    然后结束；**不要自己建目录、不要写数据**。
@@ -268,6 +299,7 @@ $LB project add 健身 --category life --goal "保持体能"
 5. missing_dates 非空 → 末尾最多提一句漏记（只提最近一天）。
 6. 全程中文、口语化，总共不超过 3 句——这是推送到通道的消息，不是长报告。
 7. 结束前运行 python3 "$LB_SCRIPT" mark-reminder，防止兜底 crontab 重复打扰。
+   （marker 只表示「内容已生成」；兜底脚本会查 cron 的 last_status，投递失败时它会清掉 marker 重试。）
 8. 用户提到「明天/接下来要做什么」→ 用 todo add 记成新目标（早间提醒会带上）。
 9. 用户说的是「某个已有目标推进了/卡住了」→ 不要新建 todo，用 append --todo <id> 把进展挂到那个目标上。
 ```
@@ -277,11 +309,15 @@ $LB project add 健身 --category life --goal "保持体能"
 ```
 [lifebrain-morning] 执行 lifebrain skill 的早间模式（无头定时会话，回复会推送到用户所在通道）。
 
-1. 先解析脚本路径（四个候选，取第一个存在的）：
-   LB_SCRIPT="$(ls -d ~/.octop/agents/*/.octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
-   [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d .octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
-   [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d ~/.octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
-   [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d ~/.octop/skill-packages/*/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
+1. 先解析脚本路径（只取本 agent 的那份，不要用 ls ~/.octop/agents/*）：
+   LB_SCRIPT=""
+   [ -n "${OCTOP_SKILLS_DIR:-}" ] && [ -f "$OCTOP_SKILLS_DIR/lifebrain/scripts/lifebrain.py" ] && LB_SCRIPT="$OCTOP_SKILLS_DIR/lifebrain/scripts/lifebrain.py"
+   [ -z "$LB_SCRIPT" ] && [ -f "$PWD/.octop/skills/lifebrain/scripts/lifebrain.py" ] && LB_SCRIPT="$PWD/.octop/skills/lifebrain/scripts/lifebrain.py"
+   [ -z "$LB_SCRIPT" ] && [ -n "${OCTOP_AGENT_ID:-}" ] && [ -f "$HOME/.octop/agents/$OCTOP_AGENT_ID/.octop/skills/lifebrain/scripts/lifebrain.py" ] && LB_SCRIPT="$HOME/.octop/agents/$OCTOP_AGENT_ID/.octop/skills/lifebrain/scripts/lifebrain.py"
+   [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d "$HOME"/.octop/agents/*/.octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
+   [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d "$HOME"/.octop/skill-packages/*/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
+1.5 跑一次 python3 "$LB_SCRIPT" config，确认 scope.runtime_scope 是本 agent（不是别人的）；
+   不一致就换用 $OCTOP_SKILLS_DIR 下那份，绝不读别人的数据。
 2. 运行 python3 "$LB_SCRIPT" status --lookback 2，读 JSON。
 3. 运行 python3 "$LB_SCRIPT" todo review --days 7，读 JSON（目标进展复盘：今天该聚焦哪几个、投入 vs 预计）。
 4. 可选：用 memory_search 查跟这些项目相关的未完成事项，最多补 1 条，不要硬凑。
@@ -317,6 +353,9 @@ octop --agent <AGENT_ID> cron create --trigger "cron:30 7 * * *" \
 
 ## 硬性规则
 
+- **不串数据**：同一台机器上可能有别的用户在跑。**只用本 agent 目录下的脚本**
+  （`$OCTOP_SKILLS_DIR` 指向它），读写前用 `$LB config` 确认 `scope.runtime_scope` 是自己；
+  任何情况下都不要去读 `~/lifebrain` 里不属于自己的那份。
 - **数据目录由用户定**：首次使用必须先提议、拿到明确确认再 `init`；没确认前不建目录、不写盘。
 - 周文件是**唯一真相源**：任何数据只写进周文件，项目索引一律由脚本重算，**绝不直接编辑 `projects/*.md`**。
 - 条目行必须是合法结构化行，解析失败的行会在 rebuild 时被丢弃 —— 写完即跑脚本，确认 `dropped` 为空。
