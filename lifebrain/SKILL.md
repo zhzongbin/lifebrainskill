@@ -281,27 +281,34 @@ $LB project add 健身 --category life --goal "保持体能"
 ```
 [lifebrain-reminder] 执行 lifebrain skill 的提醒模式（无头定时会话，回复会推送到用户所在通道）。
 
-1. 先解析脚本路径（只取本 agent 的那份，不要用 ls ~/.octop/agents/*）：
+1. 先解析脚本路径（**只取当前 agent 自己目录里的那份**，不要扫 ~/.octop/agents/*）：
    LB_SCRIPT=""
-   [ -n "${OCTOP_SKILLS_DIR:-}" ] && [ -f "$OCTOP_SKILLS_DIR/lifebrain/scripts/lifebrain.py" ] && LB_SCRIPT="$OCTOP_SKILLS_DIR/lifebrain/scripts/lifebrain.py"
-   [ -z "$LB_SCRIPT" ] && [ -f "$PWD/.octop/skills/lifebrain/scripts/lifebrain.py" ] && LB_SCRIPT="$PWD/.octop/skills/lifebrain/scripts/lifebrain.py"
-   [ -z "$LB_SCRIPT" ] && [ -n "${OCTOP_AGENT_ID:-}" ] && [ -f "$HOME/.octop/agents/$OCTOP_AGENT_ID/.octop/skills/lifebrain/scripts/lifebrain.py" ] && LB_SCRIPT="$HOME/.octop/agents/$OCTOP_AGENT_ID/.octop/skills/lifebrain/scripts/lifebrain.py"
+   for p in "$OCTOP_SKILLS_DIR/lifebrain/scripts/lifebrain.py" "$PWD/.octop/skills/lifebrain/scripts/lifebrain.py" "$HOME/.octop/agents/${OCTOP_AGENT_ID:-}/.octop/skills/lifebrain/scripts/lifebrain.py"; do
+     [ -f "$p" ] && LB_SCRIPT="$p" && break
+   done
    [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d "$HOME"/.octop/skill-packages/*/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
-   都还没命中就 find ~ -path '*skills/lifebrain/scripts/lifebrain.py' | head -1
-1.5 跑一次 python3 "$LB_SCRIPT" config，确认 scope.runtime_scope 是本 agent（不是别人的）；
-   不一致就换用 $OCTOP_SKILLS_DIR 下那份，绝不读别人的数据。
-2. 运行 python3 "$LB_SCRIPT" status --lookback 3，读 JSON。
-2.5 若 status 里 initialized=false（用户还没确认数据目录）→ 只回一句「还没定记录放哪儿，回我一句我就给你建好」
-   然后结束；**不要自己建目录、不要写数据**。
-3. recorded=true → 只回一句「今天已经记过了 ✓」+ 今天的条目，不再问问题。
-4. recorded=false → 1-2 句话问「今天主要做了什么？大概多久？」，用户回复后用 append 写入
+   [ -z "$LB_SCRIPT" ] && { echo "找不到 lifebrain.py（自己 agent 的技能目录里没有），停止"; exit 1; }
+2. 运行 python3 "$LB_SCRIPT" config，读 JSON。先确认 scope.runtime_scope 就是当前 agent
+   （应该是 ${OCTOP_AGENT_ID:-当前agent}）、scope.scope_mismatch 是 false——不是的话说明脚本定位错了，
+   用 "$OCTOP_SKILLS_DIR/lifebrain/scripts/lifebrain.py" 重来一次，别用别人的数据。
+3. 运行 python3 "$LB_SCRIPT" status --lookback 3，读 JSON。
+3.5 若 status 里 initialized=false（用户还没确认数据目录）→ 只回一句「还没定记录放哪儿，回我一句我就给你建好」
+   然后结束；不要自己建目录、不要写数据。
+4. recorded=true → 只回一句「今天已经记过了 ✓」+ 今天的条目，不再问问题。
+5. recorded=false → 1-2 句话问「今天主要做了什么？大概多久？」，用户回复后用 append 写入
    （项目要先在 projects.yaml 登记；脚本会自动重建索引）。
-5. missing_dates 非空 → 末尾最多提一句漏记（只提最近一天）。
-6. 全程中文、口语化，总共不超过 3 句——这是推送到通道的消息，不是长报告。
-7. 结束前运行 python3 "$LB_SCRIPT" mark-reminder，防止兜底 crontab 重复打扰。
-   （marker 只表示「内容已生成」；兜底脚本会查 cron 的 last_status，投递失败时它会清掉 marker 重试。）
-8. 用户提到「明天/接下来要做什么」→ 用 todo add 记成新目标（早间提醒会带上）。
-9. 用户说的是「某个已有目标推进了/卡住了」→ 不要新建 todo，用 append --todo <id> 把进展挂到那个目标上。
+6. missing_dates 非空 → 末尾最多提一句漏记（只提最近一天）。
+7. 全程中文、口语化，总共不超过 3 句——这是推送到通道的消息，不是长报告。
+8. 结束前运行 python3 "$LB_SCRIPT" mark-reminder，防止兜底 crontab 重复打扰。
+   （兜底脚本发现投递失败时会用 mark-reminder --clear 清掉并重试，所以这里写不写都不影响兜底。）
+9. 用户提到「明天/接下来要做什么」→ todo add --content "..." [--project ...] [--goal ...] 记成新目标，
+   早间提醒会把它列进今天的目标清单。
+10. 用户报的是「某个已有目标推进了/卡住了」（不是新事项）→ 不要新建 todo。
+    先 todo list --status pending 找到对应目标 id，再
+    append --date <今天> --time <时间> --project <项目> --type <类型> --duration <时长>
+    --content "<进展>" --todo <id> 把进展挂到那个目标上（时长会计入该目标的累计投入）。
+    id 不确定就问用户一句「这条是哪个目标的进展？」，不要瞎挂。
+11. 只有用户明确说「这个做完了」才 todo done <id> 结案；记一条进展不算完成。
 ```
 
 **早间任务的 prompt 模板**（配合 `cron:30 7 * * *` 这类早上触发）：
@@ -309,25 +316,29 @@ $LB project add 健身 --category life --goal "保持体能"
 ```
 [lifebrain-morning] 执行 lifebrain skill 的早间模式（无头定时会话，回复会推送到用户所在通道）。
 
-1. 先解析脚本路径（只取本 agent 的那份，不要用 ls ~/.octop/agents/*）：
+1. 先解析脚本路径（**只取当前 agent 自己目录里的那份**，不要扫 ~/.octop/agents/*）：
    LB_SCRIPT=""
-   [ -n "${OCTOP_SKILLS_DIR:-}" ] && [ -f "$OCTOP_SKILLS_DIR/lifebrain/scripts/lifebrain.py" ] && LB_SCRIPT="$OCTOP_SKILLS_DIR/lifebrain/scripts/lifebrain.py"
-   [ -z "$LB_SCRIPT" ] && [ -f "$PWD/.octop/skills/lifebrain/scripts/lifebrain.py" ] && LB_SCRIPT="$PWD/.octop/skills/lifebrain/scripts/lifebrain.py"
-   [ -z "$LB_SCRIPT" ] && [ -n "${OCTOP_AGENT_ID:-}" ] && [ -f "$HOME/.octop/agents/$OCTOP_AGENT_ID/.octop/skills/lifebrain/scripts/lifebrain.py" ] && LB_SCRIPT="$HOME/.octop/agents/$OCTOP_AGENT_ID/.octop/skills/lifebrain/scripts/lifebrain.py"
+   for p in "$OCTOP_SKILLS_DIR/lifebrain/scripts/lifebrain.py" "$PWD/.octop/skills/lifebrain/scripts/lifebrain.py" "$HOME/.octop/agents/${OCTOP_AGENT_ID:-}/.octop/skills/lifebrain/scripts/lifebrain.py"; do
+     [ -f "$p" ] && LB_SCRIPT="$p" && break
+   done
    [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d "$HOME"/.octop/skill-packages/*/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
-1.5 跑一次 python3 "$LB_SCRIPT" config，确认 scope.runtime_scope 是本 agent（不是别人的）；
-   不一致就换用 $OCTOP_SKILLS_DIR 下那份，绝不读别人的数据。
-2. 运行 python3 "$LB_SCRIPT" status --lookback 2，读 JSON。
-3. 运行 python3 "$LB_SCRIPT" todo review --days 7，读 JSON（目标进展复盘：今天该聚焦哪几个、投入 vs 预计）。
-4. 可选：用 memory_search 查跟这些项目相关的未完成事项，最多补 1 条，不要硬凑。
-5. 输出不超过 5 行：
+   [ -z "$LB_SCRIPT" ] && { echo "找不到 lifebrain.py（自己 agent 的技能目录里没有），停止"; exit 1; }
+2. 运行 python3 "$LB_SCRIPT" config，读 JSON。先确认 scope.runtime_scope 就是当前 agent
+   （应该是 ${OCTOP_AGENT_ID:-当前agent}）、scope.scope_mismatch 是 false——不是的话说明脚本定位错了，
+   换成 "$OCTOP_SKILLS_DIR/lifebrain/scripts/lifebrain.py" 再来，别用别人的数据。
+3. 运行 python3 "$LB_SCRIPT" status --lookback 2，读 JSON。
+3.5 若 status 里 initialized=false（用户还没确认数据目录）→ 只回一句「还没定记录放哪儿，回我一句我就给你建好」
+   然后结束；不要自己建目录、不要写数据。
+4. 运行 python3 "$LB_SCRIPT" todo review --days 7，读 JSON（目标进展复盘：今天该聚焦哪几个、投入 vs 预计）。
+5. 可选：用 memory_search 查跟这些项目相关的未完成事项，最多补 1 条，不要硬凑。
+6. 输出不超过 5 行：
    - 第 1 行：早安 + 「今天的目标：1) … 2) …」（最多 3 条；没有目标写「今天还没排目标」）
    - 第 2 行：进展——每个目标最近一次进展 + 累计投入（如「t1 测线：上次到解释剖面，累计 3.5h/16h」）
    - 第 3 行：昨天做了什么（1 行以内）
-   - 第 4 行：有漏记就提一句；然后**最多问一个问题**——挑一个目标问「今天想先推哪一步 / 有没有新进展或卡点」
+   - 第 4 行：有漏记就提一句；然后最多问一个问题——挑一个目标问「今天想先推哪一步 / 有没有新进展或卡点」
      （只问一个，不要变问卷）
-6. 全程中文、口语化，第一句就是人话，不要 JSON、不要脚本回显。
-7. 早间只读不写：不要 append、不要 todo add、不要 todo done，等用户回复再动手。
+7. 全程中文、口语化，第一句就是人话，不要 JSON、不要脚本回显。
+8. 早间只读不写：不要 append、不要 todo add、不要 todo done，等用户回复再动手。
 ```
 
 **建任务**（`--agent` 换成自己的 agent id）：

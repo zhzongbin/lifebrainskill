@@ -241,12 +241,43 @@ def test_installer_picks_own_agent():
         shutil.rmtree(home, ignore_errors=True)
 
 
+def test_prompt_templates_are_safe():
+    """cron prompt 模板本身不能引入跨 agent 串用，且必须放得进 Octop 的 2000 字上限。"""
+    home = Path(tempfile.mkdtemp(prefix="lb-prompt-"))
+    try:
+        env = base_env(home, "AAAA1111")
+        for kind, label in (("evening", "晚间"), ("morning", "早间")):
+            args = [str(INSTALLER), "--print-prompt"]
+            if kind == "morning":
+                args.append("morning")
+            p = subprocess.run(["bash", *args], capture_output=True, text=True, env=env)
+            check(f"{label}模板能打印出来", p.returncode == 0, p.stderr[:200])
+            tpl = p.stdout.strip()
+            check(f"{label}模板不超过 2000 字（Octop 硬上限）", len(tpl) <= 2000, f"实际 {len(tpl)}")
+            check(f"{label}模板不含 agents/* 通配扫描",
+                  "ls -d ~/.octop/agents/*" not in tpl and "agents/*/.octop" not in tpl, tpl[:200])
+            check(f"{label}模板不含 find ~ 全盘扫描", "find ~ -path" not in tpl, tpl[:200])
+            check(f"{label}模板校验 scope.runtime_scope", "scope.runtime_scope" in tpl, tpl[:200])
+            check(f"{label}模板校验 scope.scope_mismatch", "scope.scope_mismatch" in tpl, tpl[:200])
+            check(f"{label}模板找不到脚本就停", "exit 1" in tpl, tpl[:200])
+
+        # SKILL.md 里给用户手抄的模板必须和 installer 的一致，避免两边漂移
+        skill_md = (REPO / "lifebrain" / "SKILL.md").read_text(encoding="utf-8")
+        for kind in ("evening", "morning"):
+            args = [str(INSTALLER), "--print-prompt"] + (["morning"] if kind == "morning" else [])
+            tpl = subprocess.run(["bash", *args], capture_output=True, text=True, env=env).stdout.strip()
+            check(f"SKILL.md 里的{kind}模板和 installer 一致", tpl in skill_md, "SKILL.md 模板已漂移")
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
 def main() -> int:
     test_scope_dirs_dont_overlap()
     test_no_cross_read()
     test_wrong_script_copy_still_isolated()
     test_marker_semantics()
     test_installer_picks_own_agent()
+    test_prompt_templates_are_safe()
     print("\n" + "=" * 46)
     print(f"通过 {PASS} / 失败 {FAIL}")
     for f in FAILURES:

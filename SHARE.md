@@ -245,7 +245,7 @@ Octop 实例内也能从 SkillHub 搜到并装进共享包（控制台 → 技�
 | CLI 建的任务不触发 | 写的是本地 DB，服务没重载 | `octop service restart`，或改用聊天里建 |
 | 提醒来两次 | 调度器 + 兜底 crontab 都发了 | 靠 `mark-reminder` 的 marker 去重，别删兜底脚本 |
 | **发不出去（`ret=-2 prepare failed`）** | 微信 bot 掉线：同一个微信号被拿去绑了别的 bot | 用自己的微信号重新扫码绑定；`getconfig` 成功但 `sendmessage` 失败就是这个症状 |
-| **读到别人的记录** | 用了 `ls ~/.octop/agents/*` 拿到别人的脚本副本，或没装 `scope.json` | `$LB config` 看 `scope.mismatch`；改用 `$OCTOP_SKILLS_DIR` 下那份；重跑 `install_octop.sh` |
+| **读到别人的记录** | 用了 `ls ~/.octop/agents/*` 拿到别人的脚本副本，或没装 `scope.json` | `$LB config` 看 `scope.scope_mismatch`；改用 `$OCTOP_SKILLS_DIR` 下那份；重跑 `install_octop.sh` |
 | **两个用户抢同一个 `~/lifebrain`** | 同机共用 `$HOME`，legacy 家目录没标主人 | `config.yaml` 里写 `owner_scope`；其他 scope 用 `~/.lifebrain/scopes/<scope>` |
 | agent 报「项目未登记」 | 写入前项目没进 `projects.yaml` | 先 `$LB project add <名> --category work|life --goal "…"` |
 | agent 报「todo tN 不存在」 | `append --todo` 指向了不存在的目标 | 先 `$LB todo add`，或用 `todo list` 核对 id |
