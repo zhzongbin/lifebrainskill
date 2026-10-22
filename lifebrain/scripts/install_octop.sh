@@ -122,8 +122,8 @@ PROMPT_TEMPLATE="$(cat <<'EOF'
    [ -n "${OCTOP_SKILLS_DIR:-}" ] && [ -f "$OCTOP_SKILLS_DIR/lifebrain/scripts/lifebrain.py" ] && LB_SCRIPT="$OCTOP_SKILLS_DIR/lifebrain/scripts/lifebrain.py"
    [ -z "$LB_SCRIPT" ] && [ -f "$PWD/.octop/skills/lifebrain/scripts/lifebrain.py" ] && LB_SCRIPT="$PWD/.octop/skills/lifebrain/scripts/lifebrain.py"
    [ -z "$LB_SCRIPT" ] && [ -n "${OCTOP_AGENT_ID:-}" ] && [ -f "$HOME/.octop/agents/$OCTOP_AGENT_ID/.octop/skills/lifebrain/scripts/lifebrain.py" ] && LB_SCRIPT="$HOME/.octop/agents/$OCTOP_AGENT_ID/.octop/skills/lifebrain/scripts/lifebrain.py"
-   [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d "$HOME"/.octop/agents/*/.octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
-   [ -z "$LB_SCRIPT" ] && { echo "找不到 lifebrain.py，停止"; exit 1; }
+   [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d "$HOME"/.octop/skill-packages/*/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
+   [ -z "$LB_SCRIPT" ] && { echo "找不到 lifebrain.py（自己 agent 的技能目录里没有），停止"; exit 1; }
 2. 运行 python3 "$LB_SCRIPT" config，读 JSON。先确认 scope.runtime_scope 就是当前 agent
    （应该是 ${OCTOP_AGENT_ID:-当前agent}）——不是的话说明脚本定位错了，用
    "$OCTOP_SKILLS_DIR/lifebrain/scripts/lifebrain.py" 重来一次，别用别人的数据。
@@ -151,8 +151,8 @@ MORNING_PROMPT_TEMPLATE="$(cat <<'EOF'
    [ -n "${OCTOP_SKILLS_DIR:-}" ] && [ -f "$OCTOP_SKILLS_DIR/lifebrain/scripts/lifebrain.py" ] && LB_SCRIPT="$OCTOP_SKILLS_DIR/lifebrain/scripts/lifebrain.py"
    [ -z "$LB_SCRIPT" ] && [ -f "$PWD/.octop/skills/lifebrain/scripts/lifebrain.py" ] && LB_SCRIPT="$PWD/.octop/skills/lifebrain/scripts/lifebrain.py"
    [ -z "$LB_SCRIPT" ] && [ -n "${OCTOP_AGENT_ID:-}" ] && [ -f "$HOME/.octop/agents/$OCTOP_AGENT_ID/.octop/skills/lifebrain/scripts/lifebrain.py" ] && LB_SCRIPT="$HOME/.octop/agents/$OCTOP_AGENT_ID/.octop/skills/lifebrain/scripts/lifebrain.py"
-   [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d "$HOME"/.octop/agents/*/.octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
-   [ -z "$LB_SCRIPT" ] && { echo "找不到 lifebrain.py，停止"; exit 1; }
+   [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d "$HOME"/.octop/skill-packages/*/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
+   [ -z "$LB_SCRIPT" ] && { echo "找不到 lifebrain.py（自己 agent 的技能目录里没有），停止"; exit 1; }
 2. 运行 python3 "$LB_SCRIPT" config，读 JSON。先确认 scope.runtime_scope 就是当前 agent
    （应该是 ${OCTOP_AGENT_ID:-当前agent}）——不是的话说明脚本定位错了，换成
    "$OCTOP_SKILLS_DIR/lifebrain/scripts/lifebrain.py" 再来，别用别人的数据。

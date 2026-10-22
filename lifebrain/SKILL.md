@@ -62,7 +62,6 @@ LB_SCRIPT=""
 [ -n "${OCTOP_SKILLS_DIR:-}" ] && [ -f "$OCTOP_SKILLS_DIR/lifebrain/scripts/lifebrain.py" ] && LB_SCRIPT="$OCTOP_SKILLS_DIR/lifebrain/scripts/lifebrain.py"
 [ -z "$LB_SCRIPT" ] && [ -f "$PWD/.octop/skills/lifebrain/scripts/lifebrain.py" ] && LB_SCRIPT="$PWD/.octop/skills/lifebrain/scripts/lifebrain.py"
 [ -z "$LB_SCRIPT" ] && [ -n "${OCTOP_AGENT_ID:-}" ] && [ -f "$HOME/.octop/agents/$OCTOP_AGENT_ID/.octop/skills/lifebrain/scripts/lifebrain.py" ] && LB_SCRIPT="$HOME/.octop/agents/$OCTOP_AGENT_ID/.octop/skills/lifebrain/scripts/lifebrain.py"
-[ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d "$HOME"/.octop/agents/*/.octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
 [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d "$HOME"/.octop/skill-packages/*/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
 LB="python3 $LB_SCRIPT"
 ```
@@ -70,8 +69,10 @@ LB="python3 $LB_SCRIPT"
 前三条是「装在 agent 工作区里」的情况（`$OCTOP_SKILLS_DIR` 由 Octop 注入，指向**本 agent**
 的技能目录），第四条是「从实例级全局技能包挂载过来」的情况
 （包目录在 `~/.octop/skill-packages/<包ID>/skills/lifebrain/`，不需要复制到工作区也能跑）。
-都还没命中就 `find ~ -path '*skills/lifebrain/scripts/lifebrain.py' 2>/dev/null | head -1`。
-解析一次后本轮对话复用 `$LB`；`$LB config` 会打印当前真实路径，可用它自检。
+**没有第五个"兜底全盘扫描"**——扫 `~/.octop/agents/*` 一定会挑到别人的 agent。
+四条都没命中就 `$LB config` 确认技能是否装好，别硬跑。
+
+解析一次后本轮对话复用 `$LB`；`$LB config` 会打印当前真实路径和 scope，可用它自检。
 
 > 万一还是拿到了别的 agent 的脚本副本，**数据不会串**：脚本会按当前进程的 scope 重新解析数据目录，
 > 并在 stderr 打出 mismatch 警告。
@@ -285,7 +286,6 @@ $LB project add 健身 --category life --goal "保持体能"
    [ -n "${OCTOP_SKILLS_DIR:-}" ] && [ -f "$OCTOP_SKILLS_DIR/lifebrain/scripts/lifebrain.py" ] && LB_SCRIPT="$OCTOP_SKILLS_DIR/lifebrain/scripts/lifebrain.py"
    [ -z "$LB_SCRIPT" ] && [ -f "$PWD/.octop/skills/lifebrain/scripts/lifebrain.py" ] && LB_SCRIPT="$PWD/.octop/skills/lifebrain/scripts/lifebrain.py"
    [ -z "$LB_SCRIPT" ] && [ -n "${OCTOP_AGENT_ID:-}" ] && [ -f "$HOME/.octop/agents/$OCTOP_AGENT_ID/.octop/skills/lifebrain/scripts/lifebrain.py" ] && LB_SCRIPT="$HOME/.octop/agents/$OCTOP_AGENT_ID/.octop/skills/lifebrain/scripts/lifebrain.py"
-   [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d "$HOME"/.octop/agents/*/.octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
    [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d "$HOME"/.octop/skill-packages/*/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
    都还没命中就 find ~ -path '*skills/lifebrain/scripts/lifebrain.py' | head -1
 1.5 跑一次 python3 "$LB_SCRIPT" config，确认 scope.runtime_scope 是本 agent（不是别人的）；
@@ -314,7 +314,6 @@ $LB project add 健身 --category life --goal "保持体能"
    [ -n "${OCTOP_SKILLS_DIR:-}" ] && [ -f "$OCTOP_SKILLS_DIR/lifebrain/scripts/lifebrain.py" ] && LB_SCRIPT="$OCTOP_SKILLS_DIR/lifebrain/scripts/lifebrain.py"
    [ -z "$LB_SCRIPT" ] && [ -f "$PWD/.octop/skills/lifebrain/scripts/lifebrain.py" ] && LB_SCRIPT="$PWD/.octop/skills/lifebrain/scripts/lifebrain.py"
    [ -z "$LB_SCRIPT" ] && [ -n "${OCTOP_AGENT_ID:-}" ] && [ -f "$HOME/.octop/agents/$OCTOP_AGENT_ID/.octop/skills/lifebrain/scripts/lifebrain.py" ] && LB_SCRIPT="$HOME/.octop/agents/$OCTOP_AGENT_ID/.octop/skills/lifebrain/scripts/lifebrain.py"
-   [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d "$HOME"/.octop/agents/*/.octop/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
    [ -z "$LB_SCRIPT" ] && LB_SCRIPT="$(ls -d "$HOME"/.octop/skill-packages/*/skills/lifebrain/scripts/lifebrain.py 2>/dev/null | head -1)"
 1.5 跑一次 python3 "$LB_SCRIPT" config，确认 scope.runtime_scope 是本 agent（不是别人的）；
    不一致就换用 $OCTOP_SKILLS_DIR 下那份，绝不读别人的数据。
